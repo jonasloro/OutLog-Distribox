@@ -1,10 +1,6 @@
 import streamlit as st
 import psycopg2
 
-# ============================================================
-# CONFIGURAÇÃO DA PÁGINA
-# ============================================================
-
 st.set_page_config(
     page_title="OutLog",
     page_icon="📦",
@@ -12,71 +8,46 @@ st.set_page_config(
 )
 
 
-# ============================================================
-# FUNÇÃO DE CONEXÃO COM O SUPABASE
-# ============================================================
-
 def conectar_supabase():
-    """
-    Abre uma conexão com o PostgreSQL do Supabase.
-
-    As credenciais ficam nos Secrets do Streamlit.
-    """
-
+    """Conecta ao PostgreSQL do Supabase usando os Secrets do Streamlit."""
     try:
-        conn = psycopg2.connect(
+        return psycopg2.connect(
             host=st.secrets["SUPABASE_HOST"],
             port=st.secrets["SUPABASE_PORT"],
             database=st.secrets["SUPABASE_DATABASE"],
             user=st.secrets["SUPABASE_USER"],
             password=st.secrets["SUPABASE_PASSWORD"]
         )
-
-        return conn
-
     except Exception as e:
         st.error(f"Erro ao conectar ao Supabase: {e}")
         return None
 
 
-# ============================================================
-# TESTE DA CONEXÃO
-# ============================================================
-
 st.title("📦 OutLog")
-
 st.subheader("Teste de conexão com o Supabase")
 
 conn = conectar_supabase()
 
-if conn:
-
+if conn is None:
+    st.warning("🔴 Não foi possível conectar ao banco.")
+else:
     st.success("🟢 Conectado ao Supabase!")
 
     try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT COUNT(*) FROM public.casulos_estrutura"
+            )
 
-        cursor = conn.cursor()
-
-        cursor.execute("SELECT COUNT(*) FROM public.casulos_estrutura")
-
-        total = cursor.fetchone()[0]
-
-        cursor.close()
-        conn.close()
+            total = cursor.fetchone()[0]
 
         st.metric(
-            "Casulos cadastrados",
+            "Casulos cadastrados no banco",
             total
         )
 
     except Exception as e:
+        st.error(f"Erro ao consultar o banco: {e}")
 
-        st.error(
-            f"Conectou ao Supabase, mas ocorreu um erro na consulta: {e}"
-        )
-
-else:
-
-    st.warning(
-        "Não foi possível estabelecer conexão com o banco."
-    )
+    finally:
+        conn.close()
