@@ -10,11 +10,21 @@ st.set_page_config(
 
 
 def conectar_supabase():
-    """Conecta ao PostgreSQL do Supabase usando a connection string do Streamlit."""
+    """
+    Conecta ao PostgreSQL do Supabase usando o Session Pooler.
+    As credenciais ficam protegidas nos Secrets do Streamlit.
+    """
+
     try:
         conn = psycopg2.connect(
-            st.secrets["SUPABASE_DB_URL"]
+            host=st.secrets["SUPABASE_HOST"],
+            port=int(st.secrets["SUPABASE_PORT"]),
+            database=st.secrets["SUPABASE_DATABASE"],
+            user=st.secrets["SUPABASE_USER"],
+            password=st.secrets["SUPABASE_PASSWORD"],
+            sslmode="require"
         )
+
         return conn
 
     except Exception as e:
@@ -29,7 +39,11 @@ st.subheader("Teste de conexão com o Supabase")
 conn = conectar_supabase()
 
 
-if conn:
+if conn is None:
+
+    st.error("🔴 Não foi possível conectar ao banco.")
+
+else:
 
     st.success("🟢 Conectado ao Supabase!")
 
@@ -43,25 +57,30 @@ if conn:
 
             total_casulos = cursor.fetchone()[0]
 
-
         st.metric(
             "Casulos cadastrados",
             total_casulos
         )
 
         if total_casulos == 21:
-            st.success("✅ Banco conectado e tabela casulos_estrutura encontrada!")
+
+            st.success(
+                "✅ Conexão funcionando! Os 21 casulos foram encontrados."
+            )
+
+        else:
+
+            st.warning(
+                f"Conexão funcionando, mas foram encontrados "
+                f"{total_casulos} registros."
+            )
 
     except Exception as e:
 
         st.error(
-            f"Conectou ao banco, mas houve erro na consulta: {e}"
+            f"Conectou ao banco, mas ocorreu um erro na consulta: {e}"
         )
 
     finally:
 
         conn.close()
-
-else:
-
-    st.warning("🔴 Não foi possível conectar ao banco.")
