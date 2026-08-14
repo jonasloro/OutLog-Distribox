@@ -1575,16 +1575,79 @@ def classificar_grupo_analise(descricao, referencia, grupos):
 
     return None
 
-def classificar_marca_analise(descricao, referencia, marcas):
-    texto = normalizar_texto_analise(f"{descricao} {referencia}")
-    melhor = None
-    melhor_len = -1
-    for marca in marcas:
-        nm = normalizar_texto_analise(marca)
-        if nm and nm in texto and len(nm) > melhor_len:
-            melhor = marca
-            melhor_len = len(nm)
-    return melhor
+def _tokens_sem_genero(nome):
+    toks = normalizar_texto_analise(nome).split()
+    return [t for t in toks if t not in {"FEMIN", "MASC", "FEMININO", "MASCULINO"}]
+
+
+def classificar_grupo_marca_por_descricao(descricao, referencia, mapa_oficial, grupos, marcas):
+    """Classifica na ordem real do cadastro do SofStore:
+
+    DESCRIÇÃO = GRUPO -> MARCA -> demais informações.
+
+    1) Procura o grupo oficial mais longo no início da descrição.
+    2) Procura a marca oficial imediatamente após o grupo.
+    3) Valida o par contra o mapa oficial Grupo x Marca quando disponível.
+    4) Só usa a lógica legada como fallback se o padrão textual não puder ser lido.
+    """
+    texto = normalizar_texto_analise(descricao)
+    toks = texto.split()
+    if not toks:
+        return None, None, "sem descrição"
+
+    def grupo_prefixo(candidatos):
+        achados = []
+        for g in candidatos:
+            gt = _tokens_sem_genero(g)
+            if gt and len(toks) >= len(gt) and toks[:len(gt)] == gt:
+                achados.append((len(gt), g, gt))
+        achados.sort(key=lambda x: (x[0], len(normalizar_texto_analise(x[1]))), reverse=True)
+        return achados[0] if achados else None
+
+    def marca_imediata(pos, candidatos):
+        achados = []
+        for m in candidatos:
+            bt = _tokens_sem_genero(m)
+            if bt and len(toks) >= pos + len(bt) and toks[pos:pos+len(bt)] == bt:
+                achados.append((len(bt), m, bt))
+        achados.sort(key=lambda x: (x[0], len(normalizar_texto_analise(x[1]))), reverse=True)
+        return achados[0] if achados else None
+
+    gp = grupo_prefixo(grupos or [])
+    if gp:
+        _, grupo, gt = gp
+        mp = marca_imediata(len(gt), marcas or [])
+        if mp:
+            _, marca, _ = mp
+            gn = normalizar_texto_analise(grupo)
+            mn = normalizar_texto_analise(marca)
+            # O cadastro oficial de Grupo x Marca é a confirmação final.
+            if not mapa_oficial or (mn, gn) in mapa_oficial:
+                return grupo, marca, "prefixo descricao"
+
+    # Segunda tentativa: pares oficiais completos, útil quando um grupo oficial
+    # inclui um sufixo de gênero que não aparece na descrição literal.
+    candidatos = []
+    for marca_norm, grupo_norm in (mapa_oficial or {}).keys():
+        gt = _tokens_sem_genero(grupo_norm)
+        bt = _tokens_sem_genero(marca_norm)
+        if not gt or not bt or len(toks) < len(gt)+len(bt):
+            continue
+        if toks[:len(gt)] == gt and toks[len(gt):len(gt)+len(bt)] == bt:
+            candidatos.append((len(gt)*100+len(bt)*10, grupo_norm, marca_norm))
+    if candidatos:
+        candidatos.sort(reverse=True)
+        _, gn, mn = candidatos[0]
+        g_out = next((x for x in grupos if normalizar_texto_analise(x) == gn), gn)
+        m_out = next((x for x in marcas if normalizar_texto_analise(x) == mn), mn)
+        return g_out, m_out, "prefixo oficial"
+
+    # Fallback legado apenas para descrições que não preservaram o padrão.
+    grupo = classificar_grupo_analise(descricao, referencia, grupos)
+    marca = classificar_marca_analise(descricao, referencia, marcas)
+    if grupo and marca:
+        return grupo, marca, "fallback"
+    return grupo, marca, "parcial"
 
 
 def encontrar_detalhamento_por_codigo(codigo, detalhamento):
@@ -1638,6 +1701,9 @@ def construir_analise_rua1(estoque_total, estoque_rua1, detalhamento, grupos, ma
     pendente_sem_grupo = 0
     pendente_sem_marca = 0
     recuperado = 0
+    classificacao_prefixo = 0
+    classificacao_fallback = 0
+    classificacao_parcial = 0
 
     # Primeiro passe: classifica cada código.
     for codigo, quantidade_total in estoque_total.items():
@@ -1656,14 +1722,11 @@ def construir_analise_rua1(estoque_total, estoque_rua1, detalhamento, grupos, ma
         if info.get("origem_match") == "código do produto":
             recuperado += qtd_total
 
-        grupo = classificar_grupo_analise(
+        grupo, marca, origem_classificacao = classificar_grupo_marca_por_descricao(
             info.get("descricao", ""),
             info.get("referencia", ""),
+            mapa_oficial,
             grupos_norm,
-        )
-        marca = classificar_marca_analise(
-            info.get("descricao", ""),
-            info.get("referencia", ""),
             marcas_norm,
         )
 
@@ -1671,12 +1734,19 @@ def construir_analise_rua1(estoque_total, estoque_rua1, detalhamento, grupos, ma
             pendente_sem_grupo += qtd_total
         if not marca:
             pendente_sem_marca += qtd_total
+        if origem_classificacao == "prefixo descricao":
+            classificacao_prefixo += qtd_total
+        elif origem_classificacao == "fallback":
+            classificacao_fallback += qtd_total
+        else:
+            classificacao_parcial += qtd_total
 
         detalhes.append({
             "codigo": codigo, "qtd": qtd_total, "r1": qtd_r1,
             "grupo": normalizar_texto_analise(grupo) if grupo else None,
             "marca": normalizar_texto_analise(marca) if marca else None,
             "origem": info.get("origem_match", "exato"),
+            "origem_classificacao": origem_classificacao,
         })
 
     # Segundo passe: consome os limites oficiais, priorizando Rua 1.
@@ -1770,6 +1840,9 @@ def construir_analise_rua1(estoque_total, estoque_rua1, detalhamento, grupos, ma
         "sem_grupo": pendente_sem_grupo,
         "sem_marca": pendente_sem_marca,
         "recuperado_produto": recuperado,
+        "classificacao_prefixo": classificacao_prefixo,
+        "classificacao_fallback": classificacao_fallback,
+        "classificacao_parcial": classificacao_parcial,
         "fechamento_ok": abs(total_oficial - (
             total_confirmado + total_sem_classificacao + total_nao_localizado
         )) < 0.01,
@@ -1947,42 +2020,6 @@ def extrair_baixas_romaneio_pdf(arquivo_pdf):
 
     return linhas_extraidas
 
-def _assinatura_estrutura_cd():
-    """Gera uma assinatura estável da estrutura para detectar mudanças no Supabase."""
-    partes = []
-    for rua, cfg in sorted(ESTRUTURA_CD.items()):
-        partes.append((
-            rua,
-            cfg.get("tipo", ""),
-            cfg.get("genero", ""),
-            tuple(cfg.get("cols_impar", [])),
-            tuple(cfg.get("cols_par", [])),
-            tuple(cfg.get("cols_seq", [])),
-            tuple(cfg.get("metal", [])),
-            tuple(cfg.get("metal_cols", [])),
-        ))
-    return tuple(partes)
-
-def reconstruir_base_dados_cd():
-    """Reconstrói a malha dos casulos usando a estrutura atual do Supabase."""
-    estoque_persistido = carregar_estoque_do_banco()
-    base = {}
-    for r_nome, r_cfg in ESTRUTURA_CD.items():
-        if r_cfg.get("tipo") == "Inexistente":
-            continue
-        lista_lados = [("impar", r_cfg.get("cols_impar", [])), ("par", r_cfg.get("cols_par", []))]
-        if "cols_seq" in r_cfg:
-            lista_lados = [("seq", r_cfg.get("cols_seq", []))]
-
-        for lado, cols in lista_lados:
-            for c in cols:
-                l_param = "par" if r_nome == "Rua 11" else ("impar" if lado == "seq" else lado)
-                spec = obter_especificacao_casulo(r_nome, c, l_param)
-                for n in spec.get("niveis", []):
-                    chave_casulo = obter_chave_casulo(r_nome, lado, c, n)
-                    base[chave_casulo] = dict((estoque_persistido or {}).get(chave_casulo, {}))
-    return base
-
 def resolver_chave_por_endereco(rua_num, nivel, coluna):
     """
     Resolve um endereço (número da rua + nível + coluna) pra chave de casulo,
@@ -2019,12 +2056,27 @@ def resolver_chave_por_endereco(rua_num, nivel, coluna):
 if "configuracoes_cd_carregadas" not in st.session_state:
     st.session_state.configuracoes_cd_carregadas = bool(carregar_configuracoes_do_banco())
 
-# A estrutura do Supabase é a fonte de verdade. Se ela mudou desde a última
-# execução, a malha é reconstruída sem apagar o estoque persistido.
-assinatura_atual = _assinatura_estrutura_cd()
-if st.session_state.get("assinatura_estrutura_cd") != assinatura_atual or "base_dados_cd" not in st.session_state:
-    st.session_state.base_dados_cd = reconstruir_base_dados_cd()
-    st.session_state.assinatura_estrutura_cd = assinatura_atual
+# Inicialização do Estado
+if 'base_dados_cd' not in st.session_state:
+    estoque_persistido = carregar_estoque_do_banco()
+    st.session_state.base_dados_cd = {}
+    for r_nome, r_cfg in ESTRUTURA_CD.items():
+        if r_cfg.get("tipo") == "Inexistente":
+            continue
+        lista_lados = [("impar", r_cfg.get("cols_impar", [])), ("par", r_cfg.get("cols_par", []))]
+        if "cols_seq" in r_cfg:
+            lista_lados = [("seq", r_cfg["cols_seq"])]
+
+        for lado, cols in lista_lados:
+            for c in cols:
+                l_param = "par" if r_nome == "Rua 11" else ("impar" if lado == "seq" else lado)
+                spec = obter_especificacao_casulo(r_nome, c, l_param)
+                for n in spec["niveis"]:
+                    chave_casulo = obter_chave_casulo(r_nome, lado, c, n)
+                    if estoque_persistido and chave_casulo in estoque_persistido:
+                        st.session_state.base_dados_cd[chave_casulo] = estoque_persistido[chave_casulo]
+                    else:
+                        st.session_state.base_dados_cd[chave_casulo] = {}
 
 if 'banco_dados_conectado' not in st.session_state:
     st.session_state.banco_dados_conectado = testar_conexao_bd()
@@ -3243,7 +3295,7 @@ elif st.session_state.aba_ativa_selecionada == "🚚 Expedição (Teste)":
 # TELA 3.4.5: ANÁLISE DE ESTOQUE POR GRUPO / MARCA / RUA 1
 elif st.session_state.aba_ativa_selecionada == "📊 Análise Rua 1 por Grupo":
     st.markdown("<h3 style='text-align: center; color: #ffcc00;'>📊 Análise de Estoque — Rua 1 x Demais Ruas</h3>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align:center; color:#8892b0;'>Mantém o visual por Grupo × Marca e reconcilia o estoque físico com o estoque oficial do SofStore.</p>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align:center; color:#8892b0;'>O produto é classificado pela ordem do cadastro: <b>Grupo → Marca → demais informações</b>. Depois a localização é reconciliada contra o estoque oficial.</p>", unsafe_allow_html=True)
 
     col_a1, col_a2, col_a3, col_a4 = st.columns(4)
     with col_a1:
@@ -3373,6 +3425,13 @@ elif st.session_state.aba_ativa_selecionada == "📊 Análise Rua 1 por Grupo":
                         )
                         st.write(
                             f"Sem marca: {meta['sem_marca']:,.0f} peças."
+                        )
+                        st.write(
+                            f"Classificadas diretamente pelo prefixo Grupo → Marca da descrição: "
+                            f"{meta.get('classificacao_prefixo', 0):,.0f} peças."
+                        )
+                        st.write(
+                            f"Classificadas por fallback: {meta.get('classificacao_fallback', 0):,.0f} peças."
                         )
 
         except Exception as e:
@@ -4088,11 +4147,7 @@ elif st.session_state.aba_ativa_selecionada == "🛠️ Gerenciador (Admin)":
                 }, key="editor_estrutura_cd")
                 if st.button("💾 Salvar estrutura no Supabase", type="primary", key="salvar_estrutura_cfg"):
                     if salvar_estrutura_do_editor(df_estrutura_editado):
-                        st.session_state.configuracoes_cd_carregadas=True
-                        st.session_state.pop("assinatura_estrutura_cd", None)
-                        st.session_state.pop("base_dados_cd", None)
-                        st.success("Estrutura salva e recarregada com sucesso.")
-                        st.rerun()
+                        st.session_state.configuracoes_cd_carregadas=True; st.success("Estrutura salva e recarregada com sucesso."); st.rerun()
                     else:
                         st.error(f"❌ Não foi possível salvar a estrutura. `{st.session_state.get('ultimo_erro_bd')}`")
 
