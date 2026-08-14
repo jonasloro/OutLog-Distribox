@@ -30,6 +30,7 @@ except ImportError:
 
 try:
     import psycopg2
+    from psycopg2.extras import execute_values
     PSYCOPG2_DISPONIVEL = True
 except ImportError:
     PSYCOPG2_DISPONIVEL = False
@@ -2406,12 +2407,14 @@ def salvar_relatorio_sgo_supabase(df_sgo, nome_arquivo):
                 ))
 
             if linhas:
-                cur.executemany(
+                execute_values(
+                    cur,
                     """INSERT INTO public.sgo_lotes
                     (relatorio_id, lote, grupo, sku, descricao, fornecedor, quantidade,
                      status_original, fase, data_prevista, data_chegada, origem)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    VALUES %s""",
                     linhas,
+                    page_size=500,
                 )
 
         conn.commit()
