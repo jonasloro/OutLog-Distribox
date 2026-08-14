@@ -2144,6 +2144,49 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 
+def extrair_reconciliacao_oficial_pdf_upload(arquivo):
+    """
+    Lê o relatório oficial RESUMO DE ESTOQUE DO GRUPO e calcula o estoque
+    oficial válido para a análise, excluindo APENAS SACOLA e SUPRIMENTO.
+
+    Retorna:
+      total_bruto_sofstore
+      sacolas
+      suprimentos
+      total_oficial_analisavel
+    """
+    if arquivo is None or not PYPDF_DISPONIVEL:
+        return None
+    leitor = pypdf.PdfReader(BytesIO(arquivo.getvalue()))
+    texto = "\n".join(page.extract_text() or "" for page in leitor.pages)
+
+    def extrair_quantidade_linha(nome):
+        # O extrator do PDF costuma colar a quantidade no final da linha:
+        # SACOLA ... 19970
+        padrao = rf"(?mi)^\s*{re.escape(nome)}\b.*?(\d+)\s*$"
+        valores = [int(x) for x in re.findall(padrao, texto)]
+        return max(valores) if valores else 0
+
+    total_match = re.findall(r"(?mi)^\s*TOTAL\s+(\d+)\s+", texto)
+    total_bruto = int(total_match[-1]) if total_match else 0
+    sacolas = extrair_quantidade_linha("SACOLA")
+    suprimentos = extrair_quantidade_linha("SUPRIMENTO")
+
+    if total_bruto <= 0:
+        raise ValueError("Não consegui localizar o TOTAL do relatório oficial de Grupo x Marca.")
+    if sacolas < 0 or suprimentos < 0:
+        raise ValueError("Valores inválidos de SACOLA/SUPRIMENTO no relatório oficial.")
+
+    total_analisavel = total_bruto - sacolas - suprimentos
+    if total_analisavel < 0:
+        raise ValueError("SACOLA + SUPRIMENTO ultrapassam o TOTAL oficial.")
+    return {
+        "total_bruto_sofstore": total_bruto,
+        "sacolas": sacolas,
+        "suprimentos": suprimentos,
+        "total_oficial_analisavel": total_analisavel,
+    }
+
 # ==========================================
 # TELA 1: TELA INICIAL (PAINEL GERAL)
 # ==========================================
@@ -2765,6 +2808,7 @@ elif st.session_state.aba_ativa_selecionada == "🚚 Expedição (Teste)":
         st.dataframe(df_log_exp, use_container_width=True, hide_index=True)
 
 
+
 # ==========================================
 # TELA 3.4.5: ANÁLISE DE ESTOQUE POR GRUPO / MARCA / RUA 1
 # ==========================================
@@ -2811,15 +2855,73 @@ elif st.session_state.aba_ativa_selecionada == "📊 Análise Rua 1 por Grupo":
                 marcas_oficiais = []
 
             df_analise, metadados_match = construir_analise_rua1(estoque_total, estoque_r1, detalhamento, grupos_oficiais, marcas_oficiais)
-            total_geral = float(sum(estoque_total.values()))
-            total_r1 = float(min(sum(estoque_r1.values()), total_geral))
-            total_outros = max(total_geral - total_r1, 0)
+
+            # ============================================================
+            # RECONCILIAÇÃO OFICIAL
+            # Regra do usuário: excluir SOMENTE SACOLA e SUPRIMENTO.
+            # ============================================================
+            reconciliacao = extrair_reconciliacao_oficial_pdf_upload(arquivo_grupos) if arquivo_grupos else None
+            total_localizado = float(sum(estoque_total.values()))
+            total_r1 = float(min(sum(estoque_r1.values()), total_localizado))
+            total_outros = max(total_localizado - total_r1, 0)
+
+            total_classificado_grupo = float(df_analise["Total"].sum()) if not df_analise.empty else 0.0
+            localizado_sem_grupo = max(total_localizado - total_classificado_grupo, 0.0)
+
+            if reconciliacao:
+                total_oficial = float(reconciliacao["total_oficial_analisavel"])
+                nao_localizado = max(total_oficial - total_localizado, 0.0)
+                excesso_localizado = max(total_localizado - total_oficial, 0.0)
+
+                st.markdown("### 🎯 Reconciliação oficial do estoque")
+                rc1, rc2, rc3, rc4 = st.columns(4)
+                rc1.metric("SofStore — estoque oficial", f"{total_oficial:,.0f}")
+                rc2.metric("Localizado nos arquivos de ruas", f"{total_localizado:,.0f}")
+                rc3.metric("Rua 1", f"{total_r1:,.0f}")
+                rc4.metric("Não localizado", f"{nao_localizado:,.0f}")
+
+                st.info(
+                    f"Fonte oficial: {reconciliacao['total_bruto_sofstore']:,} peças. "
+                    f"Foram excluídas APENAS {reconciliacao['sacolas']:,} SACOLAS e "
+                    f"{reconciliacao['suprimentos']:,} SUPRIMENTOS. "
+                    f"Resultado oficial para análise: **{total_oficial:,.0f} peças**."
+                )
+
+                balance = total_classificado_grupo + localizado_sem_grupo + nao_localizado
+                diferenca_balance = round(total_oficial - balance)
+                if excesso_localizado > 0:
+                    st.error(
+                        f"⚠️ Os arquivos de ruas têm {excesso_localizado:,.0f} peças a mais que o "
+                        f"estoque oficial analisável. Isso precisa ser investigado antes de usar os "
+                        f"números como fechamento."
+                    )
+                elif diferenca_balance == 0:
+                    st.success(
+                        f"✅ FECHAMENTO: {total_classificado_grupo:,.0f} classificadas + "
+                        f"{localizado_sem_grupo:,.0f} localizadas sem grupo + "
+                        f"{nao_localizado:,.0f} não localizadas = **{total_oficial:,.0f}**."
+                    )
+                else:
+                    st.warning(
+                        f"⚠️ Ainda existe uma diferença de {abs(diferenca_balance):,.0f} peças "
+                        f"na reconciliação. Não vou esconder essa diferença."
+                    )
+
+                rr1, rr2, rr3 = st.columns(3)
+                rr1.metric("Localizado com grupo", f"{total_classificado_grupo:,.0f}")
+                rr2.metric("Localizado sem grupo", f"{localizado_sem_grupo:,.0f}")
+                rr3.metric("% do oficial localizado", f"{(total_localizado/total_oficial*100 if total_oficial else 0):.2f}%")
+
+            else:
+                # Sem PDF oficial, mantém a leitura física dos CSVs.
+                total_geral = total_localizado
+                st.warning("⚠️ Envie o PDF oficial Grupo x Marca para fazer o fechamento contra o SofStore.")
 
             k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Estoque total", f"{total_geral:,.0f}")
+            k1.metric("Estoque localizado", f"{total_localizado:,.0f}")
             k2.metric("Rua 1", f"{total_r1:,.0f}")
             k3.metric("Demais ruas", f"{total_outros:,.0f}")
-            k4.metric("% do estoque na Rua 1", f"{(total_r1/total_geral*100 if total_geral else 0):.1f}%")
+            k4.metric("% do localizado na Rua 1", f"{(total_r1/total_localizado*100 if total_localizado else 0):.1f}%")
 
             m1, m2, m3 = st.columns(3)
             m1.metric("✅ Códigos exatos", f"{metadados_match.get('exato', 0):,}")
@@ -2879,7 +2981,11 @@ elif st.session_state.aba_ativa_selecionada == "📊 Análise Rua 1 por Grupo":
                                 hide_index=True,
                             )
 
-                st.caption("A correspondência usa primeiro o código de barras exato. Quando ele não existe no XLSX, o sistema tenta recuperar o produto pelo CÓD. PRODUTO embutido no barcode, sem inventar uma correspondência ambígua.")
+                st.caption(
+                    "Fechamento: o PDF oficial define o estoque de referência e a análise exclui somente SACOLA e SUPRIMENTO. "
+                    "Os CSVs definem o estoque fisicamente localizado e a divisão Rua 1 / demais ruas. "
+                    "O que não for localizado ou não tiver grupo confirmado permanece explicitamente separado."
+                )
 
         except Exception as e:
             st.error(f"❌ Não foi possível processar os arquivos: {e}")
