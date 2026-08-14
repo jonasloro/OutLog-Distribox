@@ -3467,28 +3467,30 @@ elif st.session_state.aba_ativa_selecionada == "🚚 Expedição (Teste)":
 # TELA 3.4.5: ANÁLISE DE ESTOQUE POR GRUPO / MARCA / RUA 1
 elif st.session_state.aba_ativa_selecionada == "📊 Análise Rua 1 por Grupo":
     st.markdown("<h3 style='text-align: center; color: #ffcc00;'>📊 Análise de Estoque — Rua 1 x Demais Ruas</h3>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align:center;color:#8892b0;'>O PDF é o estoque oficial de produtos; o XLSX é o detalhamento/cadastro; os CSVs determinam a localização. Classificação: <b>Grupo → Marca → demais informações</b>.</p>", unsafe_allow_html=True)
-    col_a1,col_a2,col_a3,col_a4=st.columns(4)
+    st.markdown("<p style='text-align:center;color:#8892b0;'>O <b>PDF oficial de produtos</b> é a base principal desta análise. Os CSVs determinam a localização. O XLSX não é usado nesta etapa. Classificação: <b>Grupo → Marca → demais informações</b>.</p>", unsafe_allow_html=True)
+    col_a1,col_a2,col_a3=st.columns(3)
     with col_a1: arquivo_todas=st.file_uploader("📦 CSV — Todas as Ruas",type=['csv'],key='analise_todas_ruas')
     with col_a2: arquivo_r1=st.file_uploader("1️⃣ CSV — Rua 1",type=['csv'],key='analise_rua1')
-    with col_a3: arquivo_detalhe=st.file_uploader("🔎 XLSX — Detalhamento",type=['xlsx'],key='analise_detalhe')
-    with col_a4: arquivo_grupos=st.file_uploader("📋 PDF — Relatório Oficial de Produtos",type=['pdf'],key='analise_pdf_grupos')
-    if arquivo_todas and arquivo_r1 and arquivo_detalhe and arquivo_grupos:
+    with col_a3: arquivo_grupos=st.file_uploader("📋 PDF — Relatório Oficial de Produtos",type=['pdf'],key='analise_pdf_grupos')
+    if arquivo_todas and arquivo_r1 and arquivo_grupos:
         try:
-            assinatura=_assinatura_arquivos_rua1(arquivo_todas,arquivo_r1,arquivo_detalhe,arquivo_grupos)
+            # A assinatura desta tela considera SOMENTE os 3 arquivos efetivamente usados.
+            assinatura=_assinatura_arquivos_rua1(arquivo_todas,arquivo_r1,arquivo_grupos)
             if st.session_state.get('rua1_analise_assinatura')!=assinatura:
-                with st.spinner('🔄 Calculando Rua 1...'):
+                with st.spinner('🔄 Calculando Rua 1 com o PDF oficial...'):
                     estoque_total=ler_csv_estoque_upload(arquivo_todas)
                     estoque_r1=ler_csv_estoque_upload(arquivo_r1)
-                    detalhamento=ler_detalhamento_xlsx_upload(arquivo_detalhe)
+                    # O PDF é a única fonte cadastral/oficial desta análise; não há fallback para XLSX.
                     catalogo_pdf=extrair_catalogo_oficial_produtos_pdf_bytes(arquivo_grupos.getvalue())
-                    df_calc,meta_calc=construir_analise_rua1_v13(estoque_total,estoque_r1,detalhamento,catalogo_pdf)
+                    if not catalogo_pdf:
+                        raise ValueError('Não consegui extrair produtos do PDF oficial. Verifique se o arquivo é o Relatório de Produtos do SofStore.')
+                    df_calc,meta_calc=construir_analise_rua1_v13(estoque_total,estoque_r1,{},catalogo_pdf)
                     st.session_state.rua1_analise_df=df_calc; st.session_state.rua1_analise_meta=meta_calc; st.session_state.rua1_analise_erro=None; st.session_state.rua1_analise_assinatura=assinatura
             df_analise=st.session_state.get('rua1_analise_df'); meta=st.session_state.get('rua1_analise_meta')
             if df_analise is None or meta is None: st.warning('Nenhuma análise disponível.')
             else:
                 k1,k2,k3,k4=st.columns(4); k1.metric('🎯 Estoque oficial',f"{meta['oficial_total']:,.0f}"); k2.metric('📍 Localizado',f"{meta['local_total']:,.0f}"); k3.metric('1️⃣ Rua 1',f"{meta['local_r1']:,.0f}"); k4.metric('📌 Outras ruas',f"{meta['local_outros']:,.0f}")
-                k5,k6,k7,k8=st.columns(4); k5.metric('🔍 Não localizado',f"{meta['nao_localizado']:,.0f}"); k6.metric('⚠️ Sem cadastro',f"{meta['sem_cadastro']:,.0f}"); k7.metric('⚠️ Sem grupo/marca',f"{meta['sem_grupo']+meta['sem_marca']:,.0f}"); k8.metric('✅ Fechamento','OK' if meta['fechamento_ok'] else 'REVISAR')
+                k5,k6,k7,k8=st.columns(4); k5.metric('🔍 Não localizado',f"{meta['nao_localizado']:,.0f}"); k6.metric('⚠️ Sem cadastro no PDF',f"{meta['sem_cadastro']:,.0f}"); k7.metric('⚠️ Sem grupo/marca',f"{meta['sem_grupo']+meta['sem_marca']:,.0f}"); k8.metric('✅ Fechamento','OK' if meta['fechamento_ok'] else 'REVISAR')
                 if meta['fechamento_ok']: st.success(f"✅ Oficial {meta['oficial_total']:,.0f} = localizado {meta['confirmado']:,.0f} + não localizado {meta['nao_localizado']:,.0f}.")
                 else: st.warning('⚠️ O fechamento não foi forçado; diferenças continuam visíveis para auditoria.')
                 grupos=sorted(df_analise['Grupo'].unique().tolist()) if not df_analise.empty else []; marcas=sorted(df_analise['Marca'].unique().tolist()) if not df_analise.empty else []
@@ -3504,14 +3506,14 @@ elif st.session_state.aba_ativa_selecionada == "📊 Análise Rua 1 por Grupo":
                 if not df_view.empty:
                     resumo=df_view.groupby('Grupo',as_index=False)[['Rua 1','Outras Ruas']].sum().sort_values('Rua 1',ascending=False); st.bar_chart(resumo.set_index('Grupo')[['Rua 1','Outras Ruas']])
                 with st.expander('🔎 Auditoria'):
-                    st.write(f"Códigos/peças sem cadastro: {meta['sem_cadastro']:,.0f}")
+                    st.write(f"Códigos/peças sem cadastro no PDF: {meta['sem_cadastro']:,.0f}")
                     st.write(f"Peças sem grupo: {meta['sem_grupo']:,.0f}")
                     st.write(f"Peças sem marca: {meta['sem_marca']:,.0f}")
                     st.write(f"Conflito/excesso de localização: {meta['conflito']:,.0f}")
         except Exception as e:
             st.error(f"❌ Não foi possível processar os arquivos: {e}")
     else:
-        st.info('Envie os quatro arquivos: Todas as Ruas, Rua 1, Detalhamento XLSX e o PDF oficial de Produtos.')
+        st.info('Envie os três arquivos: Todas as Ruas, Rua 1 e o PDF oficial de Produtos.')
 
 # ==========================================
 # TELA 3.5: ESTATÍSTICAS DE CASULOS (RAIO-X DA ESTRUTURA)
