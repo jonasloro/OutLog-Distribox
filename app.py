@@ -1235,72 +1235,129 @@ def extrair_grupos_marcas_pdf_upload(arquivo):
 
 
 def extrair_mapa_oficial_grupo_marca_pdf(arquivo):
-    """Retorna {(marca_normalizada, grupo_normalizado): quantidade_oficial}
-    a partir do relatório SofStore Agrupado por MARCA / Detalhado por GRUPO.
-    Remove somente SACOLA e SUPRIMENTO.
+    """Extrai o mapa oficial (marca, grupo) -> quantidade do SofStore.
+
+    Suporta os dois layouts que o SofStore já gerou neste projeto:
+      1) Agrupado por: GRUPO | Detalhado por: MARCA
+         Ex.: BLUSA FEMIN: / MAX GLAMM 1953 ...
+      2) Agrupado por: MARCA | Detalhado por: GRUPO
+         Ex.: MAX GLAMM / BLUSA FEMIN 1953 ...
+
+    Remove SOMENTE os grupos SACOLA e SUPRIMENTO.
+    O total oficial usado pela análise é a soma das linhas válidas,
+    nunca o TOTAL bruto do PDF.
     """
     if arquivo is None or not PYPDF_DISPONIVEL:
-        return {}, {}, {}
+        return {}, [], [], 0
 
     leitor = pypdf.PdfReader(BytesIO(arquivo.getvalue()))
-    texto = "\n".join(
-        (pagina.extract_text(extraction_mode="layout") or "")
-        for pagina in leitor.pages
+    paginas = []
+    for pagina in leitor.pages:
+        try:
+            txt = pagina.extract_text(extraction_mode='layout') or ''
+        except TypeError:
+            txt = pagina.extract_text() or ''
+        paginas.append(txt)
+    texto = '\n'.join(paginas)
+
+    # Descobre a orientação pelo cabeçalho do próprio PDF.
+    header = ' '.join(texto.upper().split())
+    if 'AGRUPADO POR: GRUPO' in header:
+        orientacao = 'GRUPO_MARCA'
+    elif 'AGRUPADO POR: MARCA' in header:
+        orientacao = 'MARCA_GRUPO'
+    else:
+        # fallback pelo formato mais novo, sem bloquear o usuário
+        orientacao = 'MARCA_GRUPO'
+
+    padrao_item = re.compile(
+        r'^(.*?)\s+(\d+)\s+([\d\.]+,\d{2})\s+([\d\.]+,\d{2})\s*$'
     )
 
-    padrao = re.compile(
-        r"^(.*?)\s+(\d+)\s+([\d\.]+,\d{2})\s+([\d\.]+,\d{2})\s*$"
-    )
-
-    official = {}
-    brands = set()
+    linhas = [' '.join(x.split()).strip() for x in texto.splitlines() if x.strip()]
+    official = collections.defaultdict(int)
     groups = set()
-    marca_atual = None
+    brands = set()
+    cabecalho_atual = None
 
-    linhas = [x.rstrip() for x in texto.splitlines() if x.strip()]
+    ignore_prefixes = (
+        'RESUMO DE ESTOQUE', 'RESUMO DE ESTOQUE DO GRUPO', 'EMPRESAS:',
+        'AGRUPADO POR:', 'DETALHADO POR:', 'EMITIR POR:',
+        'CONSIDERAR ESTOQUE:', 'EMITIR P.', 'DESCRIÇÃO', 'TOTAL P.',
+        '00 - CD', 'TIPO DO ESTOQUE:'
+    )
 
-    for linha_bruta in linhas:
-        linha = " ".join(linha_bruta.split()).strip()
+    def eh_linha_sistema(s):
+        u = s.upper()
+        return u.startswith(ignore_prefixes) or u in {
+            'CD', 'CUSTO', 'VENDAESTOQUE', 'ESTOQUE', 'PROMO'
+        }
+
+    def limpa_cabecalho(s):
+        # remove : do relatório Grupo->Marca e sufixos de depósito L/N/PROMO
+        s = s.strip().rstrip(':').strip()
+        s = re.sub(r'\s+(L|N|PROMO)$', '', s, flags=re.I).strip()
+        return s
+
+    for linha in linhas:
         up = linha.upper()
-
-        if up.startswith(("RESUMO DE ESTOQUE", "EMPRESAS:", "AGRUPADO POR:",
-                           "DETALHADO POR:", "EMITIR POR:", "CONSIDERAR ESTOQUE:",
-                           "EMITIR P.", "DESCRIÇÃO", "TOTAL P.", "00 - CD", "CD")):
+        if eh_linha_sistema(linha):
+            continue
+        if up.startswith('SUBTOTAL') or re.match(r'^TOTAL\b', up):
             continue
 
-        if up.startswith(("SUBTOTAL", "TOTAL")):
-            continue
-
-        m = padrao.match(linha)
+        m = padrao_item.match(linha)
         if m:
-            grupo = m.group(1).strip()
+            campo = m.group(1).strip()
             qtd = int(m.group(2))
-            if not marca_atual:
+            if not cabecalho_atual:
                 continue
 
+            if orientacao == 'GRUPO_MARCA':
+                grupo_raw = cabecalho_atual
+                marca_raw = campo
+            else:
+                marca_raw = cabecalho_atual
+                grupo_raw = campo
+
+            grupo = limpa_cabecalho(grupo_raw)
+            marca = limpa_cabecalho(marca_raw)
             gnorm = normalizar_texto_analise(grupo)
-            mnorm = normalizar_texto_analise(marca_atual)
+            mnorm = normalizar_texto_analise(marca)
 
-            if gnorm in {"SACOLA", "SUPRIMENTO"}:
+            if not gnorm or not mnorm:
+                continue
+            # Exclusão deliberadamente RESTRITA: somente sacolas e suprimentos.
+            if gnorm in {'SACOLA', 'SUPRIMENTO'}:
                 continue
 
-            official[(mnorm, gnorm)] = official.get((mnorm, gnorm), 0) + qtd
-            brands.add(marca_atual)
+            official[(mnorm, gnorm)] += qtd
             groups.add(grupo)
+            brands.add(marca)
             continue
 
-        # Cabeçalho de marca.
-        if not re.search(r"\d", linha) and len(linha) > 2:
-            if up in {"CUSTO", "VENDAESTOQUE", "ESTOQUE", "DESCRIÇÃO"}:
-                continue
-            if up.startswith(("RESUMO", "EMPRESAS", "AGRUPADO", "DETALHADO", "EMITIR", "CONSIDERAR")):
-                continue
-            marca_atual = re.sub(r"\s+(L|N|PROMO)$", "", linha, flags=re.I).strip()
+        # Cabeçalho de grupo quando o PDF está GRUPO -> MARCA.
+        if orientacao == 'GRUPO_MARCA':
+            if linha.endswith(':') and not re.search(r'\d', linha):
+                cand = limpa_cabecalho(linha)
+                if cand and normalizar_texto_analise(cand) not in {'SACOLA', 'SUPRIMENTO'}:
+                    cabecalho_atual = cand
+                else:
+                    cabecalho_atual = cand
+            continue
 
-    # validação do total oficial
-    total_oficial = sum(official.values())
+        # Cabeçalho de marca quando o PDF está MARCA -> GRUPO.
+        if not re.search(r'\d', linha) and len(linha) > 1:
+            cand = limpa_cabecalho(linha)
+            if cand and not eh_linha_sistema(cand):
+                cabecalho_atual = cand
+
+    # Em alguns PDFs antigos, o título vem em Grupo -> Marca mas pode haver
+    # espaços/linhas quebradas. O mapa acima continua correto porque só usa
+    # linhas numéricas sob o cabeçalho ativo.
+    official = dict(official)
+    total_oficial = int(sum(official.values()))
     return official, sorted(groups), sorted(brands), total_oficial
-
 
 def classificar_grupo_analise(descricao, referencia, grupos):
     """Classifica o grupo oficial do SofStore com regras determinísticas.
@@ -2969,7 +3026,7 @@ elif st.session_state.aba_ativa_selecionada == "📊 Análise Rua 1 por Grupo":
             )
 
             if not mapa_oficial:
-                st.error("📋 O PDF oficial não trouxe linhas Grupo × Marca reconhecíveis. Use o relatório de 11:38 no formato 'Agrupado por: MARCA / Detalhado por: GRUPO'.")
+                st.error("📋 O PDF oficial não trouxe linhas Grupo × Marca reconhecíveis. Use o relatório Grupo × Marca do SofStore. A tela aceita os formatos 'Agrupado por: GRUPO / Detalhado por: MARCA' e 'Agrupado por: MARCA / Detalhado por: GRUPO'.")
             else:
                 df_analise, meta = construir_analise_rua1(
                     estoque_total,
