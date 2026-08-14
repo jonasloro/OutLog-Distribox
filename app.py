@@ -1,3 +1,4 @@
+import collections
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -1003,12 +1004,6 @@ def carregar_historico_movimentacoes(limite=200):
 # ==========================================
 # ANALISE DE ESTOQUE POR RUA / GRUPO / MARCA
 # ==========================================
-# Mapa opcional de marca -> grupos oficiais.
-# A versão V11 usa este mapa apenas como reforço de classificação; quando o
-# relatório não fornece o vínculo, ele permanece vazio e o classificador
-# segue pelas regras determinísticas já existentes.
-MAPA_MARCA_GRUPOS_ULTIMO = {}
-
 def normalizar_texto_analise(valor):
     texto = unicodedata.normalize("NFKD", str(valor or "")).encode("ascii", "ignore").decode("ascii").upper()
     texto = re.sub(r"[^A-Z0-9]+", " ", texto)
@@ -1118,46 +1113,193 @@ def ler_detalhamento_xlsx_upload(arquivo):
     return resultado
 
 
+
 def extrair_grupos_marcas_pdf_upload(arquivo):
-    """Extrai a lista oficial de grupos e marcas do relatório do SofStore."""
+    """Extrai grupos/marcas oficiais e, quando possível, o limite de peças por Marca+Grupo.
+    O relatório do SofStore pode vir com quebras de linha diferentes; por isso usamos
+    o modo layout do pypdf e reconhecemos a linha de produto pelo trio:
+    QUANTIDADE + CUSTO + VENDA.
+    """
     if arquivo is None or not PYPDF_DISPONIVEL:
         return [], []
+
     leitor = pypdf.PdfReader(BytesIO(arquivo.getvalue()))
-    texto = "\n".join(page.extract_text() or "" for page in leitor.pages)
+    texto = "\n".join(
+        (pagina.extract_text(extraction_mode="layout") or "")
+        for pagina in leitor.pages
+    )
+
+    padrao_linha_produto = re.compile(
+        r"^(.*?)\s+(\d+)\s+([\d\.]+,\d{2})\s+([\d\.]+,\d{2})\s*$"
+    )
+
     grupos = []
     marcas = []
     grupo_atual = None
-    linhas = [" ".join(x.split()).strip() for x in texto.splitlines() if x.strip()]
-    for linha in linhas:
-        if linha.startswith("SUBTOTAL"):
-            grupo_atual = None
-            continue
-        m = re.match(r"^(.*?)\s+[\d\.,]+\s+[\d\.,]+\d*$", linha)
-        if grupo_atual and m:
-            marcas.append(m.group(1).strip())
-            continue
-        if linha.upper() == linha and not re.search(r"\d", linha) and len(linha) > 2:
-            grupo_atual = linha
-            grupos.append(linha)
-    grupos_unicos = []
-    vistos = set()
-    for grupo in grupos:
-        chave = normalizar_texto_analise(grupo)
-        if chave in {"", "RESUMO DE ESTOQUE DO GRUPO", "RESUMO DE ESTOQUE", "DESCRICAO", "CUSTO", "VENDAESTOQUE", "CD", "TOTAL P", "GRUPO"}:
-            continue
-        if chave not in vistos:
-            vistos.add(chave)
-            grupos_unicos.append(grupo)
-    marcas_unicas = []
-    vistos = set()
-    for marca in marcas:
-        base = normalizar_texto_analise(marca)
-        base = re.sub(r"\s+(PROMO|L|N|NAC)$", "", base).strip()
-        if base and base not in vistos:
-            vistos.add(base)
-            marcas_unicas.append(base)
-    return grupos_unicos, marcas_unicas
 
+    linhas = [x.rstrip() for x in texto.splitlines() if x.strip()]
+
+    for linha_bruta in linhas:
+        linha = " ".join(linha_bruta.split()).strip()
+        if not linha:
+            continue
+
+        up = linha.upper()
+
+        if up.startswith(("RESUMO DE ESTOQUE", "EMPRESAS:", "AGRUPADO POR:",
+                           "DETALHADO POR:", "EMITIR POR:", "CONSIDERAR ESTOQUE:",
+                           "EMITIR P.", "DESCRIÇÃO", "TOTAL P.", "00 - CD")):
+            continue
+
+        if up.startswith("SUBTOTAL") or re.match(r"^TOTAL\b", up):
+            continue
+
+        m = padrao_linha_produto.match(linha)
+        if m:
+            descricao_grupo = m.group(1).strip()
+            if grupo_atual:
+                grupos.append(grupo_atual)
+            # A linha reconhecida aqui é um item do grupo atual, e não um cabeçalho.
+            # A marca é o cabeçalho anterior; guardamos as marcas encontradas abaixo
+            continue
+
+        # Cabeçalho de marca: linha textual sem números, após normalização.
+        if not re.search(r"\d", linha) and len(linha) > 2:
+            # Não tratar textos de cabeçalho como marca.
+            if up in {"CD", "CUSTO", "VENDAESTOQUE", "ESTOQUE", "DESCRIÇÃO"}:
+                continue
+            marca = re.sub(r"\s+(L|N|PROMO)$", "", linha, flags=re.I).strip()
+            if marca and not up.startswith(("RESUMO", "AGRUPADO", "DETALHADO", "EMITIR", "CONSIDERAR")):
+                marcas.append(marca)
+                grupo_atual = None
+
+    # Lista oficial de grupos: fazemos uma segunda passada, robusta, capturando
+    # subtítulos de grupos dos PDFs que são emitidos em "GRUPO x MARCA".
+    grupos_texto = set()
+    marca_atual = None
+    for linha_bruta in linhas:
+        linha = " ".join(linha_bruta.split()).strip()
+        if not linha:
+            continue
+        up = linha.upper()
+
+        if up.startswith(("RESUMO DE ESTOQUE", "EMPRESAS:", "AGRUPADO POR:",
+                           "DETALHADO POR:", "EMITIR POR:", "CONSIDERAR ESTOQUE:",
+                           "EMITIR P.", "DESCRIÇÃO", "TOTAL P.", "00 - CD")):
+            continue
+        if up.startswith("SUBTOTAL") or re.match(r"^TOTAL\b", up):
+            continue
+
+        m = padrao_linha_produto.match(linha)
+        if m:
+            continue
+
+        if not re.search(r"\d", linha) and len(linha) > 2:
+            cand = re.sub(r"\s+(L|N|PROMO)$", "", linha, flags=re.I).strip()
+            if cand and not cand.upper().startswith(("RESUMO", "EMPRESAS", "AGRUPADO", "DETALHADO", "EMITIR", "CONSIDERAR")):
+                # Nesta versão do relatório o cabeçalho textual é a MARCA.
+                marca_atual = cand
+
+    # O conjunto real de grupos vem das linhas de produto.
+    # Mantemos somente descrições que o classificador reconhece como grupo oficial.
+    grupos_candidatos = []
+    for linha_bruta in linhas:
+        linha = " ".join(linha_bruta.split()).strip()
+        m = padrao_linha_produto.match(linha)
+        if m:
+            g = m.group(1).strip()
+            if g and len(g) > 2:
+                grupos_candidatos.append(g)
+
+    for g in grupos_candidatos:
+        grupos_texto.add(g)
+
+    # Deduplicação / normalização
+    grupos_unicos = []
+    vistos_g = set()
+    for g in grupos_texto:
+        k = normalizar_texto_analise(g)
+        if k and k not in vistos_g:
+            vistos_g.add(k)
+            grupos_unicos.append(g)
+
+    marcas_unicas = []
+    vistos_m = set()
+    for m in marcas:
+        k = normalizar_texto_analise(m)
+        if k and k not in vistos_m:
+            vistos_m.add(k)
+            marcas_unicas.append(m)
+
+    return sorted(grupos_unicos), sorted(marcas_unicas)
+
+
+def extrair_mapa_oficial_grupo_marca_pdf(arquivo):
+    """Retorna {(marca_normalizada, grupo_normalizado): quantidade_oficial}
+    a partir do relatório SofStore Agrupado por MARCA / Detalhado por GRUPO.
+    Remove somente SACOLA e SUPRIMENTO.
+    """
+    if arquivo is None or not PYPDF_DISPONIVEL:
+        return {}, {}, {}
+
+    leitor = pypdf.PdfReader(BytesIO(arquivo.getvalue()))
+    texto = "\n".join(
+        (pagina.extract_text(extraction_mode="layout") or "")
+        for pagina in leitor.pages
+    )
+
+    padrao = re.compile(
+        r"^(.*?)\s+(\d+)\s+([\d\.]+,\d{2})\s+([\d\.]+,\d{2})\s*$"
+    )
+
+    official = {}
+    brands = set()
+    groups = set()
+    marca_atual = None
+
+    linhas = [x.rstrip() for x in texto.splitlines() if x.strip()]
+
+    for linha_bruta in linhas:
+        linha = " ".join(linha_bruta.split()).strip()
+        up = linha.upper()
+
+        if up.startswith(("RESUMO DE ESTOQUE", "EMPRESAS:", "AGRUPADO POR:",
+                           "DETALHADO POR:", "EMITIR POR:", "CONSIDERAR ESTOQUE:",
+                           "EMITIR P.", "DESCRIÇÃO", "TOTAL P.", "00 - CD", "CD")):
+            continue
+
+        if up.startswith(("SUBTOTAL", "TOTAL")):
+            continue
+
+        m = padrao.match(linha)
+        if m:
+            grupo = m.group(1).strip()
+            qtd = int(m.group(2))
+            if not marca_atual:
+                continue
+
+            gnorm = normalizar_texto_analise(grupo)
+            mnorm = normalizar_texto_analise(marca_atual)
+
+            if gnorm in {"SACOLA", "SUPRIMENTO"}:
+                continue
+
+            official[(mnorm, gnorm)] = official.get((mnorm, gnorm), 0) + qtd
+            brands.add(marca_atual)
+            groups.add(grupo)
+            continue
+
+        # Cabeçalho de marca.
+        if not re.search(r"\d", linha) and len(linha) > 2:
+            if up in {"CUSTO", "VENDAESTOQUE", "ESTOQUE", "DESCRIÇÃO"}:
+                continue
+            if up.startswith(("RESUMO", "EMPRESAS", "AGRUPADO", "DETALHADO", "EMITIR", "CONSIDERAR")):
+                continue
+            marca_atual = re.sub(r"\s+(L|N|PROMO)$", "", linha, flags=re.I).strip()
+
+    # validação do total oficial
+    total_oficial = sum(official.values())
+    return official, sorted(groups), sorted(brands), total_oficial
 
 
 def classificar_grupo_analise(descricao, referencia, grupos):
@@ -1173,18 +1315,9 @@ def classificar_grupo_analise(descricao, referencia, grupos):
         return grupos_norm.get(normalizar_texto_analise(nome))
 
     def gen():
-        # O SofStore frequentemente cola FEM/MASC no final do nome/modelo:
-        # por exemplo CS02011JMASC, BLNY1679YFEM, PL-5952 FEM.
-        # Primeiro usa tokens normais; depois procura as marcações em qualquer posição.
-        if any(x in tokens for x in ('FEM','FEMIN','FEMININO')) or re.search(r'FEM(?:ININO)?$', texto.replace(' ', '')):
+        if any(x in tokens for x in ('FEM','FEMIN','FEMININO')):
             return 'FEMIN'
-        if any(x in tokens for x in ('MASC','MASCULINO')) or re.search(r'MASC(?:ULINO)?$', texto.replace(' ', '')):
-            return 'MASC'
-        # Procura a marcação em qualquer ponto, desde que não seja parte de uma
-        # palavra comum; isso cobre códigos concatenados do cadastro.
-        if re.search(r'FEM(?:IN)?', texto):
-            return 'FEMIN'
-        if re.search(r'MASC(?:ULINO)?', texto):
+        if any(x in tokens for x in ('MASC','MASCULINO')):
             return 'MASC'
         return None
 
@@ -1193,10 +1326,6 @@ def classificar_grupo_analise(descricao, referencia, grupos):
     # Segmento de referência: no padrão xx.xxx.99.SEG.CODIGO
     partes_ref = str(referencia or '').split('.')
     seg4 = partes_ref[3] if len(partes_ref) >= 4 else ''
-
-    # Segmento 01 também aparece nas bermudas jeans masculinas do cadastro.
-    if 'BERMUDA' in tokens and seg4 == '01' and existe('BERMUDA JEANS MASC'):
-        return existe('BERMUDA JEANS MASC')
 
     # Correções de grafia/comercial
     if 'CAMSIETA' in tokens:
@@ -1225,7 +1354,7 @@ def classificar_grupo_analise(descricao, referencia, grupos):
                 '20': 'BERMUDA NYLON MASC',
                 '23': 'BERMUDA SARJA MASC',
                 '24': 'BERMUDA LINHO MASC',
-                '40': 'BERMUDA JEANS MASC', '01': 'BERMUDA JEANS MASC',
+                '40': 'BERMUDA JEANS MASC',
             }
             alvo = mapa_m.get(seg4)
             if alvo and existe(alvo):
@@ -1258,7 +1387,7 @@ def classificar_grupo_analise(descricao, referencia, grupos):
                 '20': 'BERMUDA NYLON MASC',
                 '23': 'BERMUDA SARJA MASC',
                 '24': 'BERMUDA LINHO MASC',
-                '40': 'BERMUDA JEANS MASC', '01': 'BERMUDA JEANS MASC',
+                '40': 'BERMUDA JEANS MASC',
             }.get(seg4)
         else:
             alvo = None
@@ -1318,56 +1447,6 @@ def classificar_grupo_analise(descricao, referencia, grupos):
     for alvo in familias:
         if alvo and existe(alvo):
             return existe(alvo)
-
-    # Casos de roupas/acessórios que aparecem com nomes comerciais
-    # específicos no cadastro. Só usa o mapeamento quando o grupo oficial
-    # correspondente existir no PDF, evitando inventar grupos novos.
-    especiais = [
-        ('PARKA', 'JAQUETA FEMIN' if genero == 'FEMIN' else 'JAQUETA MASC' if genero == 'MASC' else None),
-        ('SPENCER', 'BLAZER FEMIN' if genero == 'FEMIN' else 'BLAZER MASC' if genero == 'MASC' else None),
-        ('BUSTO', 'ACESSORIO FEMIN' if genero == 'FEMIN' else 'ACESSORIO MASC' if genero == 'MASC' else None),
-        ('KAFTAN', 'SAIDA PRAIA / QUIMONO FEMIN' if genero == 'FEMIN' else None),
-        ('ECHARPE', 'ACESSORIO FEMIN' if genero == 'FEMIN' else 'ACESSORIO MASC' if genero == 'MASC' else None),
-        ('MANTELA', 'ACESSORIO FEMIN' if genero == 'FEMIN' else 'ACESSORIO MASC' if genero == 'MASC' else None),
-        ('CASAQUETO', 'JAQUETA FEMIN' if genero == 'FEMIN' else 'JAQUETA MASC' if genero == 'MASC' else None),
-    ]
-    for palavra, alvo in especiais:
-        if palavra in tokens and alvo and existe(alvo):
-            return existe(alvo)
-
-    # Outras nomenclaturas presentes no cadastro que têm grupo oficial claro.
-    if 'T-SHIRT' in texto or 'TSHIRT' in texto:
-        alvo='CAMISETA FEMIN' if genero == 'FEMIN' else 'CAMISETA MC MASC' if genero == 'MASC' else None
-        if alvo and existe(alvo): return existe(alvo)
-    if 'BLUSAO' in tokens:
-        alvo='BLUSA FEMIN' if genero == 'FEMIN' else 'BLUSA MASC' if genero == 'MASC' else None
-        if alvo and existe(alvo): return existe(alvo)
-    if 'SALOPETE' in tokens:
-        if existe('VESTIDO UNICO FEMIN') and genero == 'FEMIN': return existe('VESTIDO UNICO FEMIN')
-    if 'LEGGING' in tokens and existe('CALÇA TECIDO FEMIN') and genero == 'FEMIN': return existe('CALÇA TECIDO FEMIN')
-    if 'MOCHILA' in tokens and existe('MOCHILA / BOLSA MASC') and genero == 'MASC': return existe('MOCHILA / BOLSA MASC')
-    if 'PORTA' in tokens and 'CARTAO' in tokens and existe('CARTEIRA MASC') and genero == 'MASC': return existe('CARTEIRA MASC')
-    if any(x in tokens for x in ('VISEIRA','CHAPEU','LACO','LACO')) and existe('ACESSORIO FEMIN') and genero == 'FEMIN': return existe('ACESSORIO FEMIN')
-    if 'CAL A' in texto: tokens.add('CALCA')
-    if 'TUNICA' in tokens and existe('BLUSA FEMIN') and genero == 'FEMIN': return existe('BLUSA FEMIN')
-    # Referência 52 identifica consistentemente blusas femininas no cadastro
-    # (ex.: DOT 0611), mesmo quando o nome não traz FEM.
-    if 'BLUSA' in tokens and seg4 == '52' and existe('BLUSA FEMIN'):
-        return existe('BLUSA FEMIN')
-
-    # Alias simples: o relatório pode registrar "DOT CLOTHING", enquanto o
-    # produto usa apenas "DOT". Usa a primeira palavra da marca quando isso
-    # gera um único grupo oficial compatível com a família do produto.
-    fams=('BERMUDA','CHINELO','BLUSA','CAMISETA','CAMISA','CALCA','BLAZER','CASACO','JAQUETA','CONJUNTO','MOLETOM','COLETE','CUECA','GRAVATA','BOLSA','OCULOS','CARTEIRA','MEIA','PIJAMA','BODY','MACACAO','MACAQUINHO','SAIA','BIQUINI','MAIO')
-    fam=[x for x in fams if x in tokens]
-    if fam and MAPA_MARCA_GRUPOS_ULTIMO:
-        cand=[]
-        for nm, gs in MAPA_MARCA_GRUPOS_ULTIMO.items():
-            partes=nm.split()
-            if partes and len(partes[0]) >= 4 and re.search(r'\b'+re.escape(partes[0])+r'\b', texto):
-                cand.extend(gs)
-        comp=[g for g in set(cand) if any(ft in normalizar_texto_analise(g) for ft in fam)]
-        if len(comp)==1 and existe(comp[0]): return existe(comp[0])
 
     # Família principal.
     familia = None
@@ -1457,91 +1536,188 @@ def encontrar_detalhamento_por_codigo(codigo, detalhamento):
         return info
 
     produto_map = detalhamento.get("__produto_map__", {})
-
-    # No export do SofStore, o CÓD. PRODUTO aparece embutido no barcode,
-    # normalmente logo após o primeiro dígito (ex.: 0 + 21346 + 99017).
-    # Primeiro tentamos essa posição determinística; depois tentamos as
-    # demais posições como fallback. Isso evita ambiguidades causadas por
-    # procurar qualquer substring dentro do código.
-    comprimentos = sorted({len(k) for k in produto_map if len(k) >= 4}, reverse=True)
     candidatos = []
-
-    for tamanho in comprimentos:
-        possiveis = []
-        if len(codigo) >= tamanho + 1:
-            possiveis.append(codigo[1:1+tamanho])
-        if len(codigo) >= tamanho:
-            possiveis.append(codigo[:tamanho])
-        for pos in possiveis:
-            if pos in produto_map:
-                candidatos.append((tamanho, pos, produto_map[pos]))
-        if candidatos:
-            maior = max(x[0] for x in candidatos)
-            candidatos = [x for x in candidatos if x[0] == maior]
-            break
+    for codigo_produto, infos in produto_map.items():
+        if len(codigo_produto) >= 4 and codigo_produto in codigo:
+            # Um CÓD. PRODUTO pode aparecer em várias variantes; todas elas
+            # representam a mesma descrição/referência base para a análise de grupo.
+            candidatos.append((len(codigo_produto), codigo_produto, infos))
 
     if not candidatos:
-        # Último fallback: substring, mas somente quando houver uma única
-        # correspondência de produto possível para aquele barcode.
-        for codigo_produto, infos in produto_map.items():
-            if len(codigo_produto) >= 5 and codigo_produto in codigo:
-                candidatos.append((len(codigo_produto), codigo_produto, infos))
-        if not candidatos:
-            return None
-        maior = max(x[0] for x in candidatos)
-        candidatos = [x for x in candidatos if x[0] == maior]
-
-    assinaturas = set()
-    for _, _, infos in candidatos:
-        for i in infos:
-            assinaturas.add((i.get("descricao", ""), i.get("referencia", "")))
-    if len(assinaturas) != 1:
         return None
 
-    info_base = candidatos[0][2][0].copy()
+    maior_tamanho = max(x[0] for x in candidatos)
+    melhores = [x for x in candidatos if x[0] == maior_tamanho]
+    if len(melhores) != 1:
+        # Se houver mais de um código de produto de mesmo tamanho dentro do
+        # barcode, só aceitamos quando todas as descrições/referências coincidem.
+        assinaturas = set()
+        for _, _, infos in melhores:
+            for i in infos:
+                assinaturas.add((i.get("descricao", ""), i.get("referencia", "")))
+        if len(assinaturas) != 1:
+            return None
+
+    info_base = melhores[0][2][0].copy()
     info_base["origem_match"] = "código do produto"
     return info_base
 
 
-def construir_analise_rua1(estoque_total, estoque_rua1, detalhamento, grupos, marcas):
-    linhas = []
+
+def construir_analise_rua1(estoque_total, estoque_rua1, detalhamento, grupos, marcas, mapa_oficial=None):
+    """Classificação/localização por código de barras.
+
+    A classificação do produto é feita pelo cadastro; a quantidade oficial por
+    grupo+marca vem exclusivamente do PDF do SofStore. O localizador só pode
+    consumir até o limite oficial de cada combinação.
+    """
+    mapa_oficial = mapa_oficial or {}
     grupos_norm = grupos or []
     marcas_norm = marcas or []
+
+    detalhes = []
+    pendente_sem_cadastro = 0
+    pendente_sem_grupo = 0
+    pendente_sem_marca = 0
+    recuperado = 0
+
+    # Primeiro passe: classifica cada código.
     for codigo, quantidade_total in estoque_total.items():
+        qtd_total = float(quantidade_total)
+        qtd_r1 = min(float(estoque_rua1.get(codigo, 0)), qtd_total)
+
         info = encontrar_detalhamento_por_codigo(codigo, detalhamento)
-        qtd_r1_codigo = min(float(estoque_rua1.get(codigo, 0)), float(quantidade_total))
-        if qtd_r1_codigo <= 0 and info is None:
-            continue
         if info is None:
-            grupo = "⚠️ Sem detalhamento"
-            marca = "⚠️ Sem marca"
-            origem_match = "não encontrado"
-        else:
-            grupo = classificar_grupo_analise(info.get("descricao", ""), info.get("referencia", ""), grupos_norm) or "⚠️ Grupo não mapeado"
-            marca = classificar_marca_analise(info.get("descricao", ""), info.get("referencia", ""), marcas_norm) or "⚠️ Marca não mapeada"
-            origem_match = info.get("origem_match", "exato")
-        linhas.append({
-            "Código de Barras": codigo,
-            "Grupo": grupo,
-            "Marca": marca,
-            "Total": float(quantidade_total),
-            "Rua 1": qtd_r1_codigo,
-            "Outras Ruas": max(float(quantidade_total) - qtd_r1_codigo, 0),
-            "Origem do vínculo": origem_match,
+            pendente_sem_cadastro += qtd_total
+            detalhes.append({
+                "codigo": codigo, "qtd": qtd_total, "r1": qtd_r1,
+                "grupo": None, "marca": None, "origem": "sem cadastro"
+            })
+            continue
+
+        if info.get("origem_match") == "código do produto":
+            recuperado += qtd_total
+
+        grupo = classificar_grupo_analise(
+            info.get("descricao", ""),
+            info.get("referencia", ""),
+            grupos_norm,
+        )
+        marca = classificar_marca_analise(
+            info.get("descricao", ""),
+            info.get("referencia", ""),
+            marcas_norm,
+        )
+
+        if not grupo:
+            pendente_sem_grupo += qtd_total
+        if not marca:
+            pendente_sem_marca += qtd_total
+
+        detalhes.append({
+            "codigo": codigo, "qtd": qtd_total, "r1": qtd_r1,
+            "grupo": normalizar_texto_analise(grupo) if grupo else None,
+            "marca": normalizar_texto_analise(marca) if marca else None,
+            "origem": info.get("origem_match", "exato"),
         })
-    df = pd.DataFrame(linhas)
-    if df.empty:
-        return df, {"exato": 0, "produto": 0, "nao_encontrado": 0}
-    contagem_match = df["Origem do vínculo"].value_counts().to_dict()
-    contagem_match = {
-        "exato": int(contagem_match.get("exato", 0)),
-        "produto": int(contagem_match.get("código do produto", 0)),
-        "nao_encontrado": int(contagem_match.get("não encontrado", 0)),
+
+    # Segundo passe: consome os limites oficiais, priorizando Rua 1.
+    consumido = collections.defaultdict(float)
+    linhas = []
+    conflito = 0.0
+
+    # Ordem: Rua 1 primeiro para garantir que toda peça reconhecida da Rua 1
+    # seja priorizada na reconciliação.
+    detalhes.sort(key=lambda x: (-x["r1"], -x["qtd"]))
+
+    for d in detalhes:
+        if not d["grupo"] or not d["marca"]:
+            continue
+
+        chave = (d["marca"], d["grupo"])
+        limite = float(mapa_oficial.get(chave, 0))
+        usado = consumido[chave]
+        saldo = max(limite - usado, 0.0)
+
+        r1_confirmado = min(d["r1"], saldo)
+        saldo -= r1_confirmado
+
+        outras_qtd = max(d["qtd"] - d["r1"], 0.0)
+        outras_confirmado = min(outras_qtd, saldo)
+
+        confirmado = r1_confirmado + outras_confirmado
+        consumido[chave] += confirmado
+
+        excesso = max(d["qtd"] - confirmado, 0.0)
+        conflito += excesso
+
+        if confirmado > 0:
+            linhas.append({
+                "Grupo": d["grupo"],
+                "Marca": d["marca"],
+                "Oficial SofStore": limite,
+                "Localizado": confirmado,
+                "Rua 1": r1_confirmado,
+                "Outras Ruas": outras_confirmado,
+                "Não localizado": max(limite - consumido[chave], 0.0),
+            })
+
+    # Consolida por grupo+marca. A coluna Oficial é independente do localizador.
+    if linhas:
+        df = pd.DataFrame(linhas)
+        df = (
+            df.groupby(["Grupo", "Marca"], as_index=False)[
+                ["Oficial SofStore", "Localizado", "Rua 1", "Outras Ruas"]
+            ].max()
+        )
+        # Depois de agrupar, reconstruímos localizado pela soma segura.
+        soma_loc = pd.DataFrame(linhas).groupby(["Grupo","Marca"], as_index=False)[
+            ["Localizado","Rua 1","Outras Ruas"]
+        ].sum()
+        df = df.drop(columns=["Localizado","Rua 1","Outras Ruas"]).merge(
+            soma_loc, on=["Grupo","Marca"], how="left"
+        )
+        df["Não localizado"] = (
+            df["Oficial SofStore"] - df["Localizado"]
+        ).clip(lower=0)
+        df["% Rua 1"] = np.where(
+            df["Oficial SofStore"] > 0,
+            df["Rua 1"] / df["Oficial SofStore"] * 100,
+            0
+        )
+        df = df.sort_values(["Grupo","Marca"]).reset_index(drop=True)
+    else:
+        df = pd.DataFrame(columns=[
+            "Grupo","Marca","Oficial SofStore","Localizado",
+            "Rua 1","Outras Ruas","Não localizado","% Rua 1"
+        ])
+
+    total_localizado = float(sum(estoque_total.values()))
+    total_r1 = float(min(sum(estoque_rua1.values()), total_localizado))
+    total_oficial = float(sum(mapa_oficial.values()))
+    total_confirmado = float(df["Localizado"].sum()) if not df.empty else 0.0
+    total_sem_classificacao = max(total_localizado - total_confirmado, 0.0)
+    total_nao_localizado = max(total_oficial - total_confirmado - total_sem_classificacao, 0.0)
+
+    meta = {
+        "local_total": total_localizado,
+        "local_r1": total_r1,
+        "local_outros": max(total_localizado-total_r1,0),
+        "oficial_total": total_oficial,
+        "confirmado": total_confirmado,
+        "sem_classificacao": total_sem_classificacao,
+        "nao_localizado": total_nao_localizado,
+        "conflito": conflito,
+        "sem_cadastro": pendente_sem_cadastro,
+        "sem_grupo": pendente_sem_grupo,
+        "sem_marca": pendente_sem_marca,
+        "recuperado_produto": recuperado,
+        "fechamento_ok": abs(total_oficial - (
+            total_confirmado + total_sem_classificacao + total_nao_localizado
+        )) < 0.01,
     }
-    resumo = df.groupby(["Grupo", "Marca"], as_index=False)[["Total", "Rua 1", "Outras Ruas"]].sum()
-    resumo["% Rua 1"] = np.where(resumo["Total"] > 0, resumo["Rua 1"] / resumo["Total"] * 100, 0)
-    resumo = resumo.sort_values(["Grupo", "Marca"]).reset_index(drop=True)
-    return resumo, {**contagem_match, "linhas_detalhadas": df}
+    return df, meta
+
 
 # ==========================================
 # RELATÓRIO DE ESTOQUE IMPORTADO (HISTÓRICO DE IMPORTAÇÕES)
@@ -2143,139 +2319,6 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-
-def extrair_reconciliacao_oficial_pdf_upload(arquivo):
-    """
-    Lê o relatório oficial RESUMO DE ESTOQUE DO GRUPO e calcula o estoque
-    oficial válido para a análise, excluindo APENAS SACOLA e SUPRIMENTO.
-
-    O PDF do SofStore pode ser extraído pelo pypdf com a quantidade colada
-    no final da mesma linha após os valores de custo/venda. Por isso o parser
-    usa o ÚLTIMO número inteiro da linha, em vez de depender de "TOTAL 170400".
-    """
-    if arquivo is None or not PYPDF_DISPONIVEL:
-        return None
-
-    leitor = pypdf.PdfReader(BytesIO(arquivo.getvalue()))
-    paginas = [(page.extract_text(extraction_mode="layout") or "") for page in leitor.pages]
-    texto = "\n".join(paginas)
-
-    def quantidade_da_linha(linha):
-        # Com extraction_mode="layout", o SofStore normalmente preserva:
-        # SACOLA   19970   71.095,94   71.095,94
-        # TOTAL    170400  6.605.048,01 28.330.389,76
-        # A quantidade é o PRIMEIRO inteiro após o prefixo.
-        resto = re.sub(r"^[^A-Za-zÀ-ÿ]+", "", linha.strip())
-        tokens = resto.split()
-        if not tokens:
-            return 0
-        tokens = tokens[1:]  # remove o prefixo
-        for t in tokens:
-            if re.fullmatch(r"\d{1,3}(?:\.\d{3})*", t) or re.fullmatch(r"\d+", t):
-                return int(t.replace(".", ""))
-        return 0
-
-    def quantidades_por_prefixo(prefixo):
-        vals = []
-        for linha in texto.splitlines():
-            linha_norm = " ".join(linha.split()).strip()
-            if re.match(rf"^{re.escape(prefixo)}\b", linha_norm, flags=re.I):
-                q = quantidade_da_linha(linha_norm)
-                if q > 0:
-                    vals.append(q)
-        return vals
-
-    # Total: procurar todas as linhas que começam com TOTAL e usar a última.
-    totais = quantidades_por_prefixo("TOTAL")
-    total_bruto = totais[-1] if totais else 0
-
-    # Fallback adicional: procurar TOTAL mesmo quando o extrator não preserva
-    # exatamente a quebra de linha.
-    if total_bruto <= 0:
-        m = re.findall(r"(?mi)^\s*TOTAL\b.*?(\d+)\s*$", texto)
-        if m:
-            total_bruto = int(m[-1])
-
-    sacolas = sum(quantidades_por_prefixo("SACOLA"))
-    suprimentos = sum(quantidades_por_prefixo("SUPRIMENTO"))
-
-    if total_bruto <= 0:
-        raise ValueError(
-            "Não consegui localizar o TOTAL do relatório oficial. "
-            "Tente gerar o PDF novamente mantendo o formato original do SofStore."
-        )
-
-    total_analisavel = total_bruto - sacolas - suprimentos
-    if total_analisavel < 0:
-        raise ValueError("SACOLA + SUPRIMENTO ultrapassam o TOTAL oficial.")
-
-    return {
-        "total_bruto_sofstore": total_bruto,
-        "sacolas": sacolas,
-        "suprimentos": suprimentos,
-        "total_oficial_analisavel": total_analisavel,
-    }
-
-
-def extrair_matriz_oficial_grupo_marca_pdf(arquivo):
-    """Extrai o estoque oficial por MARCA x GRUPO do PDF SofStore.
-    Exclui SOMENTE SACOLA e SUPRIMENTO da base analisável.
-    Retorna um dataframe com o estoque oficial por marca base e grupo.
-    """
-    leitor = pypdf.PdfReader(BytesIO(arquivo.getvalue()))
-    texto = "\n".join((p.extract_text(extraction_mode="layout") or "") for p in leitor.pages)
-    linhas = [" ".join(x.split()).strip() for x in texto.splitlines() if x.strip()]
-    meta = {"total_bruto": 0, "sacolas": 0, "suprimentos": 0}
-    registros = []
-    marca_atual = None
-
-    def qtd_primeiro_inteiro(parts):
-        for p in parts:
-            if re.fullmatch(r"\d+(?:\.\d{3})*", p):
-                return int(p.replace('.', ''))
-        return 0
-
-    ignorar_linhas = {
-        'RESUMO DE ESTOQUE DO GRUPO','DESCRIÇÃO','DESCRICAO','TOTAL P.','TOTAL P. CUSTO',
-        'TOTAL P. VENDA','CD','GRUPO','EMPRESAS:'
-    }
-    for linha in linhas:
-        up = normalizar_texto_analise(linha)
-        if up.startswith('TOTAL '):
-            q = qtd_primeiro_inteiro(linha.split()[1:])
-            if q: meta['total_bruto'] = q
-            continue
-        if up.startswith('SACOLA '):
-            q = qtd_primeiro_inteiro(linha.split()[1:]); meta['sacolas'] += q
-            continue
-        if up.startswith('SUPRIMENTO '):
-            q = qtd_primeiro_inteiro(linha.split()[1:]); meta['suprimentos'] += q
-            continue
-        if up.startswith('SUBTOTAL'): continue
-        if re.search(r'\d', linha):
-            # detalhe grupo + quantidade + custos
-            parts = linha.split()
-            # localizar primeiro inteiro; tudo antes dele é o grupo
-            qi = next((i for i,p in enumerate(parts) if re.fullmatch(r"\d+(?:\.\d{3})*", p)), None)
-            if qi is not None and qi > 0 and marca_atual:
-                grupo = ' '.join(parts[:qi]).strip()
-                if grupo and normalizar_texto_analise(grupo) not in {'TOTAL','SUBTOTAL'}:
-                    q = int(parts[qi].replace('.', ''))
-                    if normalizar_texto_analise(grupo) not in {'SACOLA','SUPRIMENTO'}:
-                        marca_base = re.sub(r"\s+(PROMO|L|N|NAC)$", '', marca_atual, flags=re.I).strip()
-                        registros.append((marca_base, grupo, q))
-            continue
-        # Cabeçalho de marca: texto sem números e não metadado
-        if len(linha) >= 2 and not any(linha.upper().startswith(x) for x in ['RESUMO DE ESTOQUE','AGRUPADO POR','DETALHADO POR','EMITIR POR','CONSIDERAR ESTOQUE','POSI','TIPO DO ESTOQUE']):
-            marca_atual = linha
-
-    df = pd.DataFrame(registros, columns=['Marca','Grupo','Oficial'])
-    if df.empty:
-        raise ValueError('Não consegui extrair a matriz oficial Grupo x Marca do PDF.')
-    df['Marca'] = df['Marca'].apply(lambda x: ' '.join(str(x).split()))
-    df['Grupo'] = df['Grupo'].apply(lambda x: ' '.join(str(x).split()))
-    df = df.groupby(['Marca','Grupo'], as_index=False)['Oficial'].sum()
-    return df, meta
 
 # ==========================================
 # TELA 1: TELA INICIAL (PAINEL GERAL)
@@ -2898,117 +2941,147 @@ elif st.session_state.aba_ativa_selecionada == "🚚 Expedição (Teste)":
         st.dataframe(df_log_exp, use_container_width=True, hide_index=True)
 
 
-
 # ==========================================
 # TELA 3.4.5: ANÁLISE DE ESTOQUE POR GRUPO / MARCA / RUA 1
-# ==========================================
 elif st.session_state.aba_ativa_selecionada == "📊 Análise Rua 1 por Grupo":
-    st.markdown("<h3 style='text-align: center; color: #ffcc00;'>📊 Reconciliação Oficial — Rua 1 x Demais Ruas</h3>", unsafe_allow_html=True)
-    st.caption("O SofStore é a fonte de verdade para Grupo × Marca. Os CSVs determinam onde as peças foram localizadas. Somente SACOLA e SUPRIMENTO são excluídos.")
+    st.markdown("<h3 style='text-align: center; color: #ffcc00;'>📊 Análise de Estoque — Rua 1 x Demais Ruas</h3>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align:center; color:#8892b0;'>Mantém o visual por Grupo × Marca e reconcilia o estoque físico com o estoque oficial do SofStore.</p>", unsafe_allow_html=True)
 
-    c1,c2,c3,c4,c5 = st.columns(5)
-    with c1: arquivo_todas=st.file_uploader("📦 Todas as Ruas",type=["csv"],key="analise_todas_ruas")
-    with c2: arquivo_r1=st.file_uploader("1️⃣ Rua 1",type=["csv"],key="analise_rua1")
-    with c3: arquivo_detalhe=st.file_uploader("🔎 Detalhamento",type=["xlsx"],key="analise_detalhe")
-    with c4: arquivo_grupos=st.file_uploader("📋 PDF oficial Grupo x Marca",type=["pdf"],key="analise_pdf_grupos")
-    with c5: arquivo_devolucoes=st.file_uploader("↩️ Devoluções (opcional)",type=["csv"],key="analise_devolucoes")
+    col_a1, col_a2, col_a3, col_a4 = st.columns(4)
+    with col_a1:
+        arquivo_todas = st.file_uploader("📦 CSV — Todas as Ruas", type=["csv"], key="analise_todas_ruas")
+    with col_a2:
+        arquivo_r1 = st.file_uploader("1️⃣ CSV — Rua 1", type=["csv"], key="analise_rua1")
+    with col_a3:
+        arquivo_detalhe = st.file_uploader("🔎 XLSX — Detalhamento", type=["xlsx"], key="analise_detalhe")
+    with col_a4:
+        arquivo_grupos = st.file_uploader("📋 PDF — Grupo x Marca", type=["pdf"], key="analise_pdf_grupos")
 
-    if arquivo_todas and arquivo_r1 and arquivo_detalhe and arquivo_grupos:
+    if arquivo_todas and arquivo_r1 and arquivo_detalhe:
         try:
-            estoque_total=ler_csv_estoque_upload(arquivo_todas)
-            estoque_r1=ler_csv_estoque_upload(arquivo_r1)
-            detalhamento=ler_detalhamento_xlsx_upload(arquivo_detalhe)
-            estoque_devolucoes=ler_csv_estoque_upload(arquivo_devolucoes) if arquivo_devolucoes else {}
+            estoque_total = ler_csv_estoque_upload(arquivo_todas)
+            estoque_r1 = ler_csv_estoque_upload(arquivo_r1)
+            detalhamento = ler_detalhamento_xlsx_upload(arquivo_detalhe)
 
-            oficial, meta=extrair_matriz_oficial_grupo_marca_pdf(arquivo_grupos)
-            base_oficial=float(oficial['Oficial'].sum())
-            esperado=float(meta['total_bruto']-meta['sacolas']-meta['suprimentos'])
-            if round(base_oficial)!=round(esperado):
-                st.warning(f"⚠️ A soma das linhas oficiais ({base_oficial:,.0f}) difere do TOTAL do PDF menos sacolas/suprimentos ({esperado:,.0f}). O fechamento usará a soma das linhas oficiais.")
+            mapa_oficial, grupos_oficiais, marcas_oficiais, total_oficial = (
+                extrair_mapa_oficial_grupo_marca_pdf(arquivo_grupos)
+                if arquivo_grupos else ({}, [], [], 0)
+            )
 
-            df_local, mm=construir_analise_rua1(estoque_total,estoque_r1,detalhamento,oficial['Grupo'].unique().tolist(),oficial['Marca'].unique().tolist())
-            if df_local.empty:
-                st.error("Nenhum item dos CSVs conseguiu ser relacionado ao detalhamento.")
-                st.stop()
-
-            # chaves normalizadas para cruzar a classificação local com a matriz oficial
-            oficial2=oficial.copy()
-            oficial2['mk']=oficial2['Marca'].map(normalizar_texto_analise)
-            oficial2['gk']=oficial2['Grupo'].map(normalizar_texto_analise)
-            loc=df_local.copy()
-            loc['mk']=loc['Marca'].map(normalizar_texto_analise)
-            loc['gk']=loc['Grupo'].map(normalizar_texto_analise)
-            # somente combinações oficiais entram na tabela reconciliada
-            merged=oficial2.merge(loc.groupby(['mk','gk'],as_index=False)[['Total','Rua 1','Outras Ruas']].sum(),on=['mk','gk'],how='left').fillna(0)
-            merged['Localizado bruto']=merged['Total']
-            merged['Conflito classificação']=np.maximum(merged['Localizado bruto']-merged['Oficial'],0)
-            merged['Localizado validado']=np.minimum(merged['Localizado bruto'],merged['Oficial'])
-            merged['Rua 1']=np.minimum(merged['Rua 1'],merged['Localizado validado'])
-            merged['Outras Ruas']=np.maximum(merged['Localizado validado']-merged['Rua 1'],0)
-            merged['Não localizado / devolução']=np.maximum(merged['Oficial']-merged['Localizado validado'],0)
-            merged['% Rua 1']=np.where(merged['Oficial']>0,merged['Rua 1']/merged['Oficial']*100,0)
-
-            # Totais globais por fechamento, sem dupla contagem
-            total_oficial=base_oficial
-            total_localizado=min(float(sum(estoque_total.values())),total_oficial)
-            total_r1=min(float(sum(estoque_r1.values())),total_localizado)
-            total_outros=max(total_localizado-total_r1,0)
-            total_conflito=float(merged['Conflito classificação'].sum())
-            saldo_apos_localizacao=max(total_oficial-total_localizado,0)
-            devol_informadas=float(sum(estoque_devolucoes.values())) if estoque_devolucoes else 0
-            devol=min(devol_informadas,saldo_apos_localizacao)
-            nao_loc=max(saldo_apos_localizacao-devol,0)
-
-            st.markdown("### 🎯 Fechamento que bate")
-            a,b,c,d,e=st.columns(5)
-            a.metric("SofStore — roupa + demais itens",f"{total_oficial:,.0f}")
-            b.metric("📦 Localizado nas ruas",f"{total_localizado:,.0f}")
-            c.metric("1️⃣ Rua 1",f"{total_r1:,.0f}")
-            d.metric("📍 Demais ruas",f"{total_outros:,.0f}")
-            e.metric("🔍 Não localizado",f"{nao_loc:,.0f}")
-
-            st.info(f"PDF: {meta['total_bruto']:,} total bruto − {meta['sacolas']:,} sacolas − {meta['suprimentos']:,} suprimentos = **{total_oficial:,.0f}** analisáveis.")
-            if devol_informadas:
-                st.success(f"↩️ Devoluções informadas: {devol_informadas:,.0f}. Consideradas no fechamento: {devol:,.0f}.")
-            if total_conflito>0:
-                st.warning(f"⚠️ {total_conflito:,.0f} peças das classificações locais excedem o estoque oficial de suas respectivas combinações Grupo × Marca. Elas foram retiradas do localizado validado e ficaram sinalizadas como conflito.")
-            fechamento=total_localizado+nao_loc
-            if round(fechamento)==round(total_oficial):
-                st.success(f"✅ Fechamento global confirmado: {total_localizado:,.0f} localizado + {nao_loc:,.0f} não localizado = **{total_oficial:,.0f}**.")
+            if not mapa_oficial:
+                st.error("📋 O PDF oficial não trouxe linhas Grupo × Marca reconhecíveis. Use o relatório de 11:38 no formato 'Agrupado por: MARCA / Detalhado por: GRUPO'.")
             else:
-                st.error(f"⚠️ Fechamento global não bate: {fechamento:,.0f} x {total_oficial:,.0f}.")
+                df_analise, meta = construir_analise_rua1(
+                    estoque_total,
+                    estoque_r1,
+                    detalhamento,
+                    grupos_oficiais,
+                    marcas_oficiais,
+                    mapa_oficial,
+                )
 
-            # filtros oficiais
-            marcas=sorted(merged['Marca'].unique())
-            grupos=sorted(merged['Grupo'].unique())
-            f1,f2=st.columns(2)
-            with f1: gf=st.selectbox("Grupo",["Todos"]+grupos,key="filtro_analise_grupo_v15")
-            with f2: mf=st.selectbox("Marca",["Todas"]+marcas,key="filtro_analise_marca_v15")
-            view=merged.copy()
-            if gf!="Todos": view=view[view['Grupo']==gf]
-            if mf!="Todas": view=view[view['Marca']==mf]
-            cols=['Grupo','Marca','Oficial','Localizado validado','Rua 1','Outras Ruas','Não localizado / devolução','Conflito classificação','% Rua 1']
-            st.dataframe(view[cols].sort_values('Oficial',ascending=False).style.format({'Oficial':'{:,.0f}','Localizado validado':'{:,.0f}','Rua 1':'{:,.0f}','Outras Ruas':'{:,.0f}','Não localizado / devolução':'{:,.0f}','Conflito classificação':'{:,.0f}','% Rua 1':'{:.1f}%'}),use_container_width=True,hide_index=True)
+                total_local = meta["local_total"]
+                total_r1 = meta["local_r1"]
+                total_outros = meta["local_outros"]
+                oficial = meta["oficial_total"]
 
-            st.markdown("#### 📊 Onde está a diferença")
-            resumo=merged.groupby('Grupo',as_index=False)[['Oficial','Localizado validado','Rua 1','Outras Ruas','Não localizado / devolução','Conflito classificação']].sum().sort_values('Oficial',ascending=False)
-            st.dataframe(resumo.style.format({c:'{:,.0f}' for c in resumo.columns if c!='Grupo'}),use_container_width=True,hide_index=True)
-            st.bar_chart(resumo.set_index('Grupo')[['Rua 1','Outras Ruas','Não localizado / devolução']])
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("🎯 Estoque oficial", f"{oficial:,.0f}")
+                k2.metric("📍 Localizado nas ruas", f"{total_local:,.0f}")
+                k3.metric("1️⃣ Rua 1", f"{total_r1:,.0f}")
+                k4.metric("📌 Outras ruas", f"{total_outros:,.0f}")
 
-            with st.expander("🔎 Códigos sem detalhamento / vínculo"):
-                linhas=mm.get('linhas_detalhadas',pd.DataFrame())
-                if linhas.empty: st.info('Sem linhas de detalhe.')
+                k5, k6, k7, k8 = st.columns(4)
+                k5.metric("🔍 Não localizado", f"{meta['nao_localizado']:,.0f}")
+                k6.metric("⚠️ Sem classificação", f"{meta['sem_classificacao']:,.0f}")
+                k7.metric("⚠️ Conflito de classificação", f"{meta['conflito']:,.0f}")
+                k8.metric("✅ Fechamento", "OK" if meta["fechamento_ok"] else "REVISAR")
+
+                if meta["fechamento_ok"]:
+                    st.success(
+                        f"✅ Fechamento oficial: {oficial:,.0f} = "
+                        f"{meta['confirmado']:,.0f} confirmadas + "
+                        f"{meta['sem_classificacao']:,.0f} sem classificação + "
+                        f"{meta['nao_localizado']:,.0f} não localizado."
+                    )
                 else:
-                    pend=linhas[linhas['Origem do vínculo']=='não encontrado'].copy()
-                    st.dataframe(pend.sort_values('Total',ascending=False),use_container_width=True,hide_index=True)
-            with st.expander("⚠️ Combinações Grupo × Marca em conflito"):
-                conf=merged[merged['Conflito classificação']>0][cols].sort_values('Conflito classificação',ascending=False)
-                st.dataframe(conf,use_container_width=True,hide_index=True)
+                    st.error("❌ O fechamento não bateu. O sistema bloqueou a apresentação de um total artificial.")
+
+                if total_local > oficial:
+                    st.error(
+                        f"⚠️ Os arquivos de ruas trazem {total_local:,.0f} peças, "
+                        f"acima do estoque oficial de {oficial:,.0f}. O excesso não é tratado como estoque válido."
+                    )
+
+                if df_analise.empty:
+                    st.warning("Nenhum Grupo × Marca pôde ser confirmado.")
+                else:
+                    grupos = sorted(df_analise["Grupo"].unique().tolist())
+                    marcas = sorted(df_analise["Marca"].unique().tolist())
+
+                    f1, f2 = st.columns(2)
+                    with f1:
+                        grupo_filtro = st.selectbox(
+                            "Filtrar por grupo",
+                            ["Todos"] + grupos,
+                            key="filtro_analise_grupo"
+                        )
+                    with f2:
+                        marca_filtro = st.selectbox(
+                            "Filtrar por marca",
+                            ["Todas"] + marcas,
+                            key="filtro_analise_marca"
+                        )
+
+                    df_view = df_analise.copy()
+                    if grupo_filtro != "Todos":
+                        df_view = df_view[df_view["Grupo"] == grupo_filtro]
+                    if marca_filtro != "Todas":
+                        df_view = df_view[df_view["Marca"] == marca_filtro]
+
+                    st.markdown("#### 📋 Estoque oficial × localização")
+                    st.dataframe(
+                        df_view.style.format({
+                            "Oficial SofStore": "{:,.0f}",
+                            "Localizado": "{:,.0f}",
+                            "Rua 1": "{:,.0f}",
+                            "Outras Ruas": "{:,.0f}",
+                            "Não localizado": "{:,.0f}",
+                            "% Rua 1": "{:.1f}%"
+                        }),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    st.markdown("#### 📊 Rua 1 × Outras ruas")
+                    if not df_view.empty:
+                        resumo_grupo = (
+                            df_view.groupby("Grupo", as_index=False)[
+                                ["Rua 1", "Outras Ruas"]
+                            ].sum().sort_values("Rua 1", ascending=False)
+                        )
+                        st.bar_chart(resumo_grupo.set_index("Grupo")[["Rua 1", "Outras Ruas"]])
+
+                    with st.expander("🔎 Auditoria de classificação"):
+                        st.write(
+                            f"Recuperados pelo vínculo de CÓD. PRODUTO: "
+                            f"{meta['recuperado_produto']:,.0f} peças."
+                        )
+                        st.write(
+                            f"Sem cadastro no detalhamento: {meta['sem_cadastro']:,.0f} peças."
+                        )
+                        st.write(
+                            f"Sem grupo: {meta['sem_grupo']:,.0f} peças."
+                        )
+                        st.write(
+                            f"Sem marca: {meta['sem_marca']:,.0f} peças."
+                        )
 
         except Exception as e:
-            st.error(f"❌ Não foi possível processar os arquivos: {e}")
+            st.error(f"Não foi possível processar os arquivos: {e}")
+
     else:
-        st.info("Envie os quatro arquivos obrigatórios: Todas as Ruas, Rua 1, Detalhamento e PDF oficial Grupo × Marca. Devoluções é opcional.")
+        st.info("Envie os quatro arquivos para gerar a reconciliação: Todas as Ruas, Rua 1, Detalhamento e o PDF oficial Grupo x Marca.")
 
 # ==========================================
 # TELA 3.5: ESTATÍSTICAS DE CASULOS (RAIO-X DA ESTRUTURA)
