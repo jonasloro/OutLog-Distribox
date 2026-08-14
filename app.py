@@ -3751,7 +3751,8 @@ elif st.session_state.aba_ativa_selecionada == "🚚 SGO — Próximas Entradas"
         st.caption(f"⛔ {rejeitados:,} peças rejeitadas foram retiradas do fluxo operacional e não entram no total em aberto.")
 
     st.markdown("### 🔥 Próximos que merecem atenção")
-    prioridade=aberto.sort_values(["Horizonte","Data"],na_position="last").head(8)
+    # Visualização cronológica: mais novo → mais velho. Registros sem data ficam por último.
+    prioridade=aberto.sort_values(["Data"], ascending=[False], na_position="last").head(8)
     if not prioridade.empty:
         ex=prioridade[["Data","Grupo","Fornecedor","Quantidade","Fase","Lote"]].copy()
         ex["Data"]=ex["Data"].dt.strftime("%d/%m/%Y")
@@ -3772,6 +3773,8 @@ elif st.session_state.aba_ativa_selecionada == "🚚 SGO — Próximas Entradas"
             b=busca.strip().lower()
             m=(view["Lote"].str.lower().str.contains(b,na=False)|view["SKU"].str.lower().str.contains(b,na=False)|view["Descrição"].str.lower().str.contains(b,na=False))
             view=view[m]
+        # Lista completa também segue da data mais nova para a mais antiga.
+        view=view.sort_values("Data", ascending=False, na_position="last")
         tabela=view[["Lote","Grupo","SKU","Descrição","Fornecedor","Quantidade","Fase","Data"]].copy()
         tabela["Data"]=tabela["Data"].dt.strftime("%d/%m/%Y")
         tabela=tabela.rename(columns={"Quantidade":"Peças","Fase":"Etapa","Data":"Chegada"})
