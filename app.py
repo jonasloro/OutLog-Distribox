@@ -1685,6 +1685,19 @@ def encontrar_detalhamento_por_codigo(codigo, detalhamento):
 
 
 
+def _assinatura_arquivos_rua1(*arquivos):
+    """Cria uma assinatura leve dos arquivos para não recalcular a análise a cada filtro."""
+    h = hashlib.sha1()
+    for arq in arquivos:
+        if arq is None:
+            h.update(b"<none>")
+            continue
+        bruto = arq.getvalue()
+        h.update(str(len(bruto)).encode())
+        h.update(bruto)
+    return h.hexdigest()
+
+
 def construir_analise_rua1(estoque_total, estoque_rua1, detalhamento, grupos, marcas, mapa_oficial=None):
     """Classificação/localização por código de barras.
 
@@ -3309,136 +3322,141 @@ elif st.session_state.aba_ativa_selecionada == "📊 Análise Rua 1 por Grupo":
 
     if arquivo_todas and arquivo_r1 and arquivo_detalhe:
         try:
-            estoque_total = ler_csv_estoque_upload(arquivo_todas)
-            estoque_r1 = ler_csv_estoque_upload(arquivo_r1)
-            detalhamento = ler_detalhamento_xlsx_upload(arquivo_detalhe)
-
-            mapa_oficial, grupos_oficiais, marcas_oficiais, total_oficial = (
-                extrair_mapa_oficial_grupo_marca_pdf(arquivo_grupos)
-                if arquivo_grupos else ({}, [], [], 0)
+            # IMPORTANTE: o processamento pesado acontece só quando algum dos
+            # quatro arquivos realmente muda. Trocar apenas o filtro não
+            # relê CSV/XLSX, não reextrai o PDF e não reclassifica milhares de SKUs.
+            assinatura = _assinatura_arquivos_rua1(
+                arquivo_todas, arquivo_r1, arquivo_detalhe, arquivo_grupos
             )
 
-            if not mapa_oficial:
-                st.error("📋 O PDF oficial não trouxe linhas Grupo × Marca reconhecíveis. Use o relatório Grupo × Marca do SofStore. A tela aceita os formatos 'Agrupado por: GRUPO / Detalhado por: MARCA' e 'Agrupado por: MARCA / Detalhado por: GRUPO'.")
+            if st.session_state.get("rua1_analise_assinatura") != assinatura:
+                with st.spinner("🔄 Calculando a reconciliação da Rua 1 uma vez..."):
+                    estoque_total = ler_csv_estoque_upload(arquivo_todas)
+                    estoque_r1 = ler_csv_estoque_upload(arquivo_r1)
+                    detalhamento = ler_detalhamento_xlsx_upload(arquivo_detalhe)
+
+                    mapa_oficial, grupos_oficiais, marcas_oficiais, total_oficial = (
+                        extrair_mapa_oficial_grupo_marca_pdf(arquivo_grupos)
+                        if arquivo_grupos else ({}, [], [], 0)
+                    )
+
+                    if not mapa_oficial:
+                        st.session_state.rua1_analise_erro = (
+                            "📋 O PDF oficial não trouxe linhas Grupo × Marca reconhecíveis. "
+                            "Use o relatório Grupo × Marca do SofStore."
+                        )
+                        st.session_state.rua1_analise_df = None
+                        st.session_state.rua1_analise_meta = None
+                    else:
+                        df_calc, meta_calc = construir_analise_rua1(
+                            estoque_total,
+                            estoque_r1,
+                            detalhamento,
+                            grupos_oficiais,
+                            marcas_oficiais,
+                            mapa_oficial,
+                        )
+                        st.session_state.rua1_analise_df = df_calc
+                        st.session_state.rua1_analise_meta = meta_calc
+                        st.session_state.rua1_analise_erro = None
+
+                    st.session_state.rua1_analise_assinatura = assinatura
+
+            if st.session_state.get("rua1_analise_erro"):
+                st.error(st.session_state.rua1_analise_erro)
             else:
-                df_analise, meta = construir_analise_rua1(
-                    estoque_total,
-                    estoque_r1,
-                    detalhamento,
-                    grupos_oficiais,
-                    marcas_oficiais,
-                    mapa_oficial,
-                )
+                df_analise = st.session_state.get("rua1_analise_df")
+                meta = st.session_state.get("rua1_analise_meta")
 
-                total_local = meta["local_total"]
-                total_r1 = meta["local_r1"]
-                total_outros = meta["local_outros"]
-                oficial = meta["oficial_total"]
-
-                k1, k2, k3, k4 = st.columns(4)
-                k1.metric("🎯 Estoque oficial", f"{oficial:,.0f}")
-                k2.metric("📍 Localizado nas ruas", f"{total_local:,.0f}")
-                k3.metric("1️⃣ Rua 1", f"{total_r1:,.0f}")
-                k4.metric("📌 Outras ruas", f"{total_outros:,.0f}")
-
-                k5, k6, k7, k8 = st.columns(4)
-                k5.metric("🔍 Não localizado", f"{meta['nao_localizado']:,.0f}")
-                k6.metric("⚠️ Sem classificação", f"{meta['sem_classificacao']:,.0f}")
-                k7.metric("⚠️ Conflito de classificação", f"{meta['conflito']:,.0f}")
-                k8.metric("✅ Fechamento", "OK" if meta["fechamento_ok"] else "REVISAR")
-
-                if meta["fechamento_ok"]:
-                    st.success(
-                        f"✅ Fechamento oficial: {oficial:,.0f} = "
-                        f"{meta['confirmado']:,.0f} confirmadas + "
-                        f"{meta['sem_classificacao']:,.0f} sem classificação + "
-                        f"{meta['nao_localizado']:,.0f} não localizado."
-                    )
+                if df_analise is None or meta is None:
+                    st.warning("Nenhuma análise disponível.")
                 else:
-                    st.error("❌ O fechamento não bateu. O sistema bloqueou a apresentação de um total artificial.")
+                    total_local = meta["local_total"]
+                    total_r1 = meta["local_r1"]
+                    total_outros = meta["local_outros"]
+                    oficial = meta["oficial_total"]
 
-                if total_local > oficial:
-                    st.error(
-                        f"⚠️ Os arquivos de ruas trazem {total_local:,.0f} peças, "
-                        f"acima do estoque oficial de {oficial:,.0f}. O excesso não é tratado como estoque válido."
-                    )
+                    k1, k2, k3, k4 = st.columns(4)
+                    k1.metric("🎯 Estoque oficial", f"{oficial:,.0f}")
+                    k2.metric("📍 Localizado nas ruas", f"{total_local:,.0f}")
+                    k3.metric("1️⃣ Rua 1", f"{total_r1:,.0f}")
+                    k4.metric("📌 Outras ruas", f"{total_outros:,.0f}")
 
-                if df_analise.empty:
-                    st.warning("Nenhum Grupo × Marca pôde ser confirmado.")
-                else:
-                    grupos = sorted(df_analise["Grupo"].unique().tolist())
-                    marcas = sorted(df_analise["Marca"].unique().tolist())
+                    k5, k6, k7, k8 = st.columns(4)
+                    k5.metric("🔍 Não localizado", f"{meta['nao_localizado']:,.0f}")
+                    k6.metric("⚠️ Sem classificação", f"{meta['sem_classificacao']:,.0f}")
+                    k7.metric("⚠️ Conflito de classificação", f"{meta['conflito']:,.0f}")
+                    k8.metric("✅ Fechamento", "OK" if meta["fechamento_ok"] else "REVISAR")
 
-                    f1, f2 = st.columns(2)
-                    with f1:
-                        grupo_filtro = st.selectbox(
-                            "Filtrar por grupo",
-                            ["Todos"] + grupos,
-                            key="filtro_analise_grupo"
+                    if meta["fechamento_ok"]:
+                        st.success(
+                            f"✅ Fechamento oficial: {oficial:,.0f} = "
+                            f"{meta['confirmado']:,.0f} confirmadas + "
+                            f"{meta['sem_classificacao']:,.0f} sem classificação + "
+                            f"{meta['nao_localizado']:,.0f} não localizado."
                         )
-                    with f2:
-                        marca_filtro = st.selectbox(
-                            "Filtrar por marca",
-                            ["Todas"] + marcas,
-                            key="filtro_analise_marca"
+                    else:
+                        st.error("❌ O fechamento não bateu. O sistema bloqueou a apresentação de um total artificial.")
+
+                    if total_local > oficial:
+                        st.error(
+                            f"⚠️ Os arquivos de ruas trazem {total_local:,.0f} peças, "
+                            f"acima do estoque oficial de {oficial:,.0f}. O excesso não é tratado como estoque válido."
                         )
 
-                    df_view = df_analise.copy()
-                    if grupo_filtro != "Todos":
-                        df_view = df_view[df_view["Grupo"] == grupo_filtro]
-                    if marca_filtro != "Todas":
-                        df_view = df_view[df_view["Marca"] == marca_filtro]
+                    if df_analise.empty:
+                        st.warning("Nenhum Grupo × Marca pôde ser confirmado.")
+                    else:
+                        grupos = sorted(df_analise["Grupo"].unique().tolist())
+                        marcas = sorted(df_analise["Marca"].unique().tolist())
 
-                    st.markdown("#### 📋 Estoque oficial × localização")
-                    st.dataframe(
-                        df_view.style.format({
-                            "Oficial SofStore": "{:,.0f}",
-                            "Localizado": "{:,.0f}",
-                            "Rua 1": "{:,.0f}",
-                            "Outras Ruas": "{:,.0f}",
-                            "Não localizado": "{:,.0f}",
-                            "% Rua 1": "{:.1f}%"
-                        }),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
+                        f1, f2 = st.columns(2)
+                        with f1:
+                            grupo_filtro = st.selectbox("Filtrar por grupo", ["Todos"] + grupos, key="filtro_analise_grupo")
+                        with f2:
+                            marca_filtro = st.selectbox("Filtrar por marca", ["Todas"] + marcas, key="filtro_analise_marca")
 
-                    st.markdown("#### 📊 Rua 1 × Outras ruas")
-                    if not df_view.empty:
+                        df_view = df_analise
+                        if grupo_filtro != "Todos":
+                            df_view = df_view[df_view["Grupo"] == grupo_filtro]
+                        if marca_filtro != "Todas":
+                            df_view = df_view[df_view["Marca"] == marca_filtro]
+
+                        st.markdown("#### 📋 Estoque oficial × localização")
+                        st.dataframe(
+                            df_view.style.format({
+                                "Oficial SofStore": "{:,.0f}",
+                                "Localizado": "{:,.0f}",
+                                "Rua 1": "{:,.0f}",
+                                "Outras Ruas": "{:,.0f}",
+                                "Não localizado": "{:,.0f}",
+                                "% Rua 1": "{:.1f}%"
+                            }),
+                            use_container_width=True,
+                            hide_index=True,
+                            height=520,
+                        )
+
+                        st.markdown("#### 📊 Rua 1 × Outras ruas")
                         resumo_grupo = (
-                            df_view.groupby("Grupo", as_index=False)[
-                                ["Rua 1", "Outras Ruas"]
-                            ].sum().sort_values("Rua 1", ascending=False)
+                            df_view.groupby("Grupo", as_index=False)[["Rua 1", "Outras Ruas"]]
+                            .sum().sort_values("Rua 1", ascending=False)
                         )
-                        st.bar_chart(resumo_grupo.set_index("Grupo")[["Rua 1", "Outras Ruas"]])
+                        if not resumo_grupo.empty:
+                            st.bar_chart(resumo_grupo.set_index("Grupo")[["Rua 1", "Outras Ruas"]])
 
-                    with st.expander("🔎 Auditoria de classificação"):
-                        st.write(
-                            f"Recuperados pelo vínculo de CÓD. PRODUTO: "
-                            f"{meta['recuperado_produto']:,.0f} peças."
-                        )
-                        st.write(
-                            f"Sem cadastro no detalhamento: {meta['sem_cadastro']:,.0f} peças."
-                        )
-                        st.write(
-                            f"Sem grupo: {meta['sem_grupo']:,.0f} peças."
-                        )
-                        st.write(
-                            f"Sem marca: {meta['sem_marca']:,.0f} peças."
-                        )
-                        st.write(
-                            f"Classificadas diretamente pelo prefixo Grupo → Marca da descrição: "
-                            f"{meta.get('classificacao_prefixo', 0):,.0f} peças."
-                        )
-                        st.write(
-                            f"Classificadas por fallback: {meta.get('classificacao_fallback', 0):,.0f} peças."
-                        )
-
+                        with st.expander("🔎 Auditoria de classificação"):
+                            st.write(f"Recuperados pelo vínculo de CÓD. PRODUTO: {meta['recuperado_produto']:,.0f} peças.")
+                            st.write(f"Sem cadastro no detalhamento: {meta['sem_cadastro']:,.0f} peças.")
+                            st.write(f"Sem grupo: {meta['sem_grupo']:,.0f} peças.")
+                            st.write(f"Sem marca: {meta['sem_marca']:,.0f} peças.")
+                            st.write(f"Classificação por prefixo da descrição: {meta['classificacao_prefixo']:,.0f} peças.")
+                            st.write(f"Fallback legado: {meta['classificacao_fallback']:,.0f} peças.")
         except Exception as e:
             st.error(f"Não foi possível processar os arquivos: {e}")
-
     else:
         st.info("Envie os quatro arquivos para gerar a reconciliação: Todas as Ruas, Rua 1, Detalhamento e o PDF oficial Grupo x Marca.")
+
 
 # ==========================================
 # TELA 3.5: ESTATÍSTICAS DE CASULOS (RAIO-X DA ESTRUTURA)
