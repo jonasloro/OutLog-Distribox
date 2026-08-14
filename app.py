@@ -1109,6 +1109,23 @@ def ler_detalhamento_xlsx_upload(arquivo):
     # contém o código do produto embutido; isso permite recuperar variantes
     # de tamanho/cor que não aparecem na planilha de detalhamento atual.
     resultado["__produto_map__"] = produto_map
+
+    prefix8_map = {}
+    for info in resultado.values():
+        if not isinstance(info, dict):
+            continue
+        # O próprio barcode do detalhamento fornece o prefixo do produto-base.
+        # Indexamos por ele para capturar variantes de tamanho/cor ausentes no XLSX.
+        # O código só retorna o match quando a descrição/referência é inequívoca.
+        # Aqui não guardamos as chaves internas especiais.
+        # (A construção é feita a partir das entradas normais de barcode.)
+    for bc, info in list(resultado.items()):
+        if str(bc).startswith("__"):
+            continue
+        pref = re.sub(r"\D", "", str(bc))[:8]
+        if len(pref) == 8:
+            prefix8_map.setdefault(pref, []).append(info)
+    resultado["__prefix8_map__"] = prefix8_map
     return resultado
 
 
@@ -1164,7 +1181,14 @@ def classificar_grupo_analise(descricao, referencia, grupos):
     # Regras determinísticas para categorias em que o código de produto costuma
     # trazer apenas o tipo + marca, enquanto o SofStore separa o grupo por tecido,
     # comprimento ou gênero.
-    genero = "FEMIN" if "FEMIN" in tokens else ("MASC" if "MASC" in tokens else None)
+    # O SofStore usa "FEM" nas descrições dos produtos, enquanto os grupos oficiais
+    # usam "FEMIN". Aceitamos as duas formas (e também FEMIN/MASCULINO).
+    if any(t in tokens for t in ("FEM", "FEMIN", "FEMININO")):
+        genero = "FEMIN"
+    elif any(t in tokens for t in ("MASC", "MASCULINO")):
+        genero = "MASC"
+    else:
+        genero = None
     if texto.startswith("BLUSA "):
         if "INVERNO" in tokens and genero == "FEMIN" and existe("BLUSA INVERNO FEMIN"): return existe("BLUSA INVERNO FEMIN")
         if genero == "FEMIN" and existe("BLUSA FEMIN"): return existe("BLUSA FEMIN")
@@ -1248,6 +1272,42 @@ def classificar_grupo_analise(descricao, referencia, grupos):
         grupo = "CONJUNTO FEMIN" if genero == "FEMIN" else "CONJUNTO MASC"
         if existe(grupo): return existe(grupo)
 
+    # Regras adicionais para descrições do SofStore que não trazem todas as
+    # palavras usadas no nome do grupo oficial.
+    if texto.startswith("BERMUDA "):
+        if genero == "MASC":
+            # Sem material explícito no cadastro, tratamos como bermuda jeans,
+            # que é o grupo masculino compatível disponível no relatório oficial.
+            if existe("BERMUDA JEANS MASC"): return existe("BERMUDA JEANS MASC")
+        elif genero == "FEMIN":
+            if existe("BERMUDA TECIDO FEMIN"): return existe("BERMUDA TECIDO FEMIN")
+
+    if texto.startswith("CAMISA ") and genero == "FEMIN":
+        if "CHEMISE" in tokens and existe("CAMISA CHEMISE FEMIN"):
+            return existe("CAMISA CHEMISE FEMIN")
+        if existe("CAMISA CHEMISE FEMIN"):
+            return existe("CAMISA CHEMISE FEMIN")
+
+    if texto.startswith("BATA ") and genero == "FEMIN":
+        if existe("BLUSA FEMIN"): return existe("BLUSA FEMIN")
+
+    if texto.startswith("TRIJUNTO ") and genero == "FEMIN":
+        if existe("CONJUNTO FEMIN"): return existe("CONJUNTO FEMIN")
+
+    if texto.startswith("GRAVATA ") and existe("ACESSORIO MASC"):
+        return existe("ACESSORIO MASC")
+
+    if texto.startswith(("TENIS ", "SAPATO ")):
+        grupo = "CALÇADO FEMIN" if genero == "FEMIN" else "CALÇADO MASC"
+        if existe(grupo): return existe(grupo)
+
+    if texto.startswith("PROMOÇÃO ") or texto.startswith("PROMOCAO "):
+        grupo = "PROMOCIONAL FEMIN" if genero == "FEMIN" else "PROMOCIONAL MASC"
+        if existe(grupo): return existe(grupo)
+
+    if texto.startswith("BUSTO ") and existe("SUPRIMENTO"):
+        return existe("SUPRIMENTO")
+
     # Busca genérica por todos os tokens do grupo oficial.
     melhor = None
     melhor_pontuacao = (-1, -1)
@@ -1284,6 +1344,20 @@ def encontrar_detalhamento_por_codigo(codigo, detalhamento):
         return info
 
     produto_map = detalhamento.get("__produto_map__", {})
+
+    # Algumas variantes de barcode presentes no export do estoque não existem
+    # literalmente no XLSX, mas mantêm os 8 primeiros dígitos do produto-base.
+    # Quando esse prefixo identifica uma única descrição, ele é seguro para
+    # recuperar a informação de produto sem inventar classificação.
+    prefix8 = codigo[:8]
+    prefix_map = detalhamento.get("__prefix8_map__", {})
+    prefix_infos = prefix_map.get(prefix8, [])
+    assinaturas_prefixo = {(i.get("descricao", ""), i.get("referencia", "")) for i in prefix_infos}
+    if len(assinaturas_prefixo) == 1:
+        info_base = prefix_infos[0].copy()
+        info_base["origem_match"] = "prefixo do produto"
+        return info_base
+
     candidatos = []
     for codigo_produto, infos in produto_map.items():
         if len(codigo_produto) >= 4 and codigo_produto in codigo:
@@ -1339,11 +1413,12 @@ def construir_analise_rua1(estoque_total, estoque_rua1, detalhamento, grupos, ma
         })
     df = pd.DataFrame(linhas)
     if df.empty:
-        return df, {"exato": 0, "produto": 0, "nao_encontrado": 0}
+        return df, {"exato": 0, "produto": 0, "prefixo": 0, "nao_encontrado": 0}
     contagem_match = df["Origem do vínculo"].value_counts().to_dict()
     contagem_match = {
         "exato": int(contagem_match.get("exato", 0)),
         "produto": int(contagem_match.get("código do produto", 0)),
+        "prefixo": int(contagem_match.get("prefixo do produto", 0)),
         "nao_encontrado": int(contagem_match.get("não encontrado", 0)),
     }
     resumo = df.groupby(["Grupo", "Marca"], as_index=False)[["Total", "Rua 1", "Outras Ruas"]].sum()
