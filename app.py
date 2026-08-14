@@ -2274,6 +2274,72 @@ if not st.session_state.autenticado:
 
     st.stop()
 
+
+# ==========================================
+# SGO — RELATÓRIO DE LOTES / FLUXO FUTURO
+# ==========================================
+STATUS_SGO_ORDEM = [
+    "🧵 Aviamento",
+    "🚚 Em Trânsito",
+    "⏳ Aguardando Processamento",
+    "🏭 Processamento",
+    "📤 Aguardando Envio",
+    "📦 Em Estocagem",
+    "⚠️ Qualidade",
+]
+
+
+def _sgo_fase(status):
+    status = str(status or "").strip()
+    if "Rejeitado" in status or "Retrabalho" in status:
+        return "⚠️ Qualidade"
+    if "Aviamento" in status:
+        return "🧵 Aviamento"
+    if "Trânsito" in status:
+        return "🚚 Em Trânsito"
+    if "Aguardando Processamento" in status:
+        return "⏳ Aguardando Processamento"
+    if "Área de Processamento" in status:
+        return "🏭 Processamento"
+    if "Aguardando Envio" in status:
+        return "📤 Aguardando Envio"
+    if "Estocagem" in status:
+        return "📦 Em Estocagem"
+    if status.lower() == "concluído":
+        return "✅ Concluído"
+    return status or "⚪ Sem status"
+
+
+def carregar_relatorio_sgo(uploaded_file):
+    if uploaded_file is None:
+        return None
+    df = pd.read_excel(uploaded_file, sheet_name=0)
+    obrigatorias = [
+        "Grupo/Categoria", "SKU", "Descrição", "Fornecedor", "Quantidade",
+        "Status (Kanban)", "Obs (Cores/Tamanhos)", "Lote", "Data Esperada", "Data Chegada"
+    ]
+    faltantes = [c for c in obrigatorias if c not in df.columns]
+    if faltantes:
+        raise ValueError("Colunas não encontradas no relatório SGO: " + ", ".join(faltantes))
+    df = df.copy()
+    df["Quantidade"] = pd.to_numeric(df["Quantidade"], errors="coerce").fillna(0).astype(int)
+    df["Data Esperada"] = pd.to_datetime(df["Data Esperada"], errors="coerce", dayfirst=True)
+    df["Data Chegada"] = pd.to_datetime(df["Data Chegada"], errors="coerce", dayfirst=True)
+    df["Fase"] = df["Status (Kanban)"].map(_sgo_fase)
+    df["Lote"] = df["Lote"].astype(str).str.replace(r"\.0$", "", regex=True)
+    return df
+
+
+def _sgo_card(titulo, valor, subtitulo="", cor="#ffcc00"):
+    st.markdown(f"""
+    <div style="background:#11161d;border:1px solid #283845;border-radius:12px;padding:16px 18px;min-height:118px;">
+      <div style="color:#8892b0;font-size:12px;text-transform:uppercase;letter-spacing:1px;">{titulo}</div>
+      <div style="font-size:30px;font-weight:900;color:{cor};margin-top:8px;">{valor:,}</div>
+      <div style="color:#9aa6b2;font-size:11px;margin-top:5px;">{subtitulo}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
 # SIDEBAR: NAVEGAÇÃO
 st.sidebar.markdown(f"""
 <div style='text-align:center; padding: 8px 0 14px 0;'>
@@ -2291,7 +2357,8 @@ opcoes_telas = [
     "🧪 Simulador de Capacidade",
     "📄 Importar Relatório de Estoque",
     "📥 Entrada de Dados / Abastecimento",
-    "📊 Análise Rua 1 por Grupo"
+    "📊 Análise Rua 1 por Grupo",
+    "🚚 SGO — Próximas Entradas"
 ]
 if st.session_state.papel_atual == "gerente":
     opcoes_telas.append("🛠️ Gerenciador (Admin)")
@@ -3601,6 +3668,136 @@ elif st.session_state.aba_ativa_selecionada == "📥 Entrada de Dados / Abasteci
 # ==========================================
 # TELA 5: GERENCIADOR (ADMIN)
 # ==========================================
+
+elif st.session_state.aba_ativa_selecionada == "🚚 SGO — Próximas Entradas":
+    st.markdown("<h3 style='text-align:center;color:#ffcc00;'>🚚 SGO — Próximas Entradas</h3>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align:center;color:#8892b0;'>Visualização das peças que estão chegando, em que fase estão e os lotes envolvidos.</p>", unsafe_allow_html=True)
+
+    arquivo_sgo = st.file_uploader(
+        "📄 Importe o relatório do SGO (.xlsx)",
+        type=["xlsx"],
+        key="upload_sgo_lotes"
+    )
+
+    if arquivo_sgo is not None:
+        try:
+            df_sgo = carregar_relatorio_sgo(arquivo_sgo)
+            st.session_state.sgo_relatorio_df = df_sgo
+            st.session_state.sgo_relatorio_nome = arquivo_sgo.name
+        except Exception as e:
+            st.error(f"⚠️ Não consegui processar o relatório do SGO: {e}")
+            st.stop()
+
+    df_sgo = st.session_state.get("sgo_relatorio_df")
+    if df_sgo is None:
+        st.info("📄 Envie o relatório do SGO para carregar os lotes e visualizar o fluxo.")
+        st.stop()
+
+    st.caption(f"Relatório carregado: **{st.session_state.get('sgo_relatorio_nome', 'SGO')}** · {len(df_sgo):,} lotes · {int(df_sgo['Quantidade'].sum()):,} peças")
+
+    # Filtros
+    st.markdown("### 🔎 Filtros")
+    f1, f2, f3, f4 = st.columns(4)
+    fases_disponiveis = sorted([x for x in df_sgo["Fase"].dropna().unique()])
+    grupos_disponiveis = sorted([x for x in df_sgo["Grupo/Categoria"].dropna().astype(str).unique()])
+    fornecedores_disponiveis = sorted([x for x in df_sgo["Fornecedor"].dropna().astype(str).unique()])
+    with f1:
+        fase_filtro = st.multiselect("Fase", fases_disponiveis, default=[x for x in fases_disponiveis if x != "✅ Concluído"], key="sgo_fase_filter")
+    with f2:
+        grupo_filtro = st.multiselect("Grupo/Categoria", grupos_disponiveis, key="sgo_grupo_filter")
+    with f3:
+        fornecedor_filtro = st.multiselect("Fornecedor", fornecedores_disponiveis, key="sgo_fornecedor_filter")
+    with f4:
+        somente_abertos = st.checkbox("Somente o que ainda está por vir", value=True, key="sgo_somente_abertos")
+        busca = st.text_input("Buscar lote / SKU / descrição", key="sgo_busca")
+
+    view = df_sgo.copy()
+    if somente_abertos:
+        view = view[view["Fase"] != "✅ Concluído"]
+    if fase_filtro:
+        view = view[view["Fase"].isin(fase_filtro)]
+    if grupo_filtro:
+        view = view[view["Grupo/Categoria"].astype(str).isin(grupo_filtro)]
+    if fornecedor_filtro:
+        view = view[view["Fornecedor"].astype(str).isin(fornecedor_filtro)]
+    if busca.strip():
+        b = busca.strip().lower()
+        mask = (
+            view["Lote"].str.lower().str.contains(b, na=False) |
+            view["SKU"].astype(str).str.lower().str.contains(b, na=False) |
+            view["Descrição"].astype(str).str.lower().str.contains(b, na=False)
+        )
+        view = view[mask]
+
+    # Cards
+    total_aberto = int(df_sgo.loc[df_sgo["Fase"] != "✅ Concluído", "Quantidade"].sum())
+    lotes_abertos = int((df_sgo["Fase"] != "✅ Concluído").sum())
+    transito = int(df_sgo.loc[df_sgo["Fase"] == "🚚 Em Trânsito", "Quantidade"].sum())
+    qualidade = int(df_sgo.loc[df_sgo["Fase"] == "⚠️ Qualidade", "Quantidade"].sum())
+    fluxo_df = view[view["Fase"] != "⚠️ Qualidade"].copy()
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: _sgo_card("Peças em aberto", total_aberto, f"{lotes_abertos:,} lotes não concluídos", "#ffcc00")
+    with c2: _sgo_card("Em trânsito", transito, "Compras + PCP", "#4aa3ff")
+    with c3: _sgo_card("Em estocagem", int(df_sgo.loc[df_sgo["Fase"] == "📦 Em Estocagem", "Quantidade"].sum()), "prontos para entrar no estoque", "#45a29e")
+    with c4: _sgo_card("Pendências de qualidade", qualidade, "rejeitado + retrabalho", "#e74c3c")
+
+    st.markdown("---")
+    st.markdown("### 🧭 Fluxo dos lotes")
+    # show phase cards in the order of the process
+    fase_seq = [x for x in STATUS_SGO_ORDEM if x in view["Fase"].unique()]
+    cols = st.columns(max(1, min(4, len(fase_seq))))
+    for i, fase in enumerate(fase_seq):
+        with cols[i % len(cols)]:
+            sub = view[view["Fase"] == fase]
+            qtd = int(sub["Quantidade"].sum())
+            st.markdown(f"<div style='background:#11161d;border:1px solid #283845;border-radius:12px;padding:12px;margin-bottom:12px;'><div style='font-weight:800;color:#ffcc00;'>{fase}</div><div style='font-size:25px;font-weight:900;margin-top:4px;'>{qtd:,} peças</div><div style='font-size:11px;color:#8892b0;'>{len(sub):,} lotes</div></div>", unsafe_allow_html=True)
+
+    # Tabela principal
+    st.markdown("### 📦 Próximos lotes no fluxo" )
+    colmap = {
+        "Lote":"Lote", "Grupo/Categoria":"Grupo", "SKU":"SKU", "Descrição":"Descrição",
+        "Fornecedor":"Fornecedor", "Quantidade":"Peças", "Fase":"Fase", "Data Esperada":"Data esperada", "Data Chegada":"Data chegada"
+    }
+    tabela = fluxo_df[list(colmap.keys())].rename(columns=colmap).copy()
+    tabela["Data esperada"] = tabela["Data esperada"].dt.strftime("%d/%m/%Y")
+    tabela["Data chegada"] = tabela["Data chegada"].dt.strftime("%d/%m/%Y")
+    tabela = tabela.sort_values(["Data chegada", "Data esperada"], na_position="last")
+    st.dataframe(tabela, use_container_width=True, hide_index=True, height=520)
+
+    st.markdown("### 🔎 Detalhe de um lote")
+    lotes = tabela["Lote"].astype(str).tolist()
+    if lotes:
+        lote_sel = st.selectbox("Selecione um lote", lotes, key="sgo_lote_selecao")
+        r = fluxo_df[fluxo_df["Lote"].astype(str) == str(lote_sel)].iloc[0]
+    elif not view.empty:
+        st.info("Os filtros atuais não deixaram lotes no fluxo normal. As pendências de qualidade ficam separadas abaixo.")
+    else:
+        st.info("Nenhum lote encontrado com os filtros atuais.")
+        a, b, c = st.columns(3)
+        with a:
+            st.markdown(f"**Lote:** {r['Lote']}  \n**SKU:** {r['SKU']}  \n**Grupo:** {r['Grupo/Categoria']}  \n**Fornecedor:** {r['Fornecedor']}")
+        with b:
+            st.markdown(f"**Quantidade:** {int(r['Quantidade']):,}  \n**Status:** {r['Status (Kanban)']}  \n**Data esperada:** {r['Data Esperada'].strftime('%d/%m/%Y') if pd.notna(r['Data Esperada']) else '-'}  \n**Data chegada:** {r['Data Chegada'].strftime('%d/%m/%Y') if pd.notna(r['Data Chegada']) else '-'}")
+        with c:
+            st.markdown("**Cores / tamanhos**")
+            st.write(r["Obs (Cores/Tamanhos)"] if pd.notna(r["Obs (Cores/Tamanhos)"]) else "-")
+
+    qualidade_df = view[view["Fase"] == "⚠️ Qualidade"].copy()
+    if not qualidade_df.empty:
+        with st.expander(f"⚠️ Pendências de qualidade — {int(qualidade_df['Quantidade'].sum()):,} peças / {len(qualidade_df):,} lotes"):
+            qtbl = qualidade_df[["Lote", "Grupo/Categoria", "SKU", "Fornecedor", "Quantidade", "Status (Kanban)", "Data Esperada", "Data Chegada"]].rename(columns={
+                "Grupo/Categoria":"Grupo", "Quantidade":"Peças", "Status (Kanban)":"Status",
+                "Data Esperada":"Esperada", "Data Chegada":"Chegada"
+            }).copy()
+            qtbl["Esperada"] = qtbl["Esperada"].dt.strftime("%d/%m/%Y")
+            qtbl["Chegada"] = qtbl["Chegada"].dt.strftime("%d/%m/%Y")
+            qtbl = qtbl.sort_values(["Chegada", "Esperada"], na_position="last")
+            st.dataframe(qtbl, use_container_width=True, hide_index=True, height=360)
+
+    if "botao_exportar_excel" in globals():
+        botao_exportar_excel(tabela, "sgo_lotes_filtrados.xlsx", key="export_sgo_lotes")
+
+
 elif st.session_state.aba_ativa_selecionada == "🛠️ Gerenciador (Admin)":
     if st.session_state.papel_atual != "gerente":
         st.error("⛔ Acesso restrito a usuários com papel de Gerente.")
