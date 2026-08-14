@@ -1651,51 +1651,76 @@ def classificar_grupo_marca_por_descricao(descricao, referencia, mapa_oficial, g
 
 
 def encontrar_detalhamento_por_codigo(codigo, detalhamento):
-    """Tenta casar o barcode por código exato e, depois, pelo CÓD. PRODUTO embutido no barcode."""
+    """Casa barcode por código exato e, se necessário, por CÓD. PRODUTO embutido.
+
+    A versão antiga procurava TODOS os códigos de produto para cada barcode
+    (O(N*M)). Agora só percorremos as substrings do próprio barcode (barcode
+    costuma ter 12-13 dígitos), reduzindo drasticamente o custo.
+    """
     info = detalhamento.get(codigo)
     if info is not None:
         return info
 
     produto_map = detalhamento.get("__produto_map__", {})
-    candidatos = []
-    for codigo_produto, infos in produto_map.items():
-        if len(codigo_produto) >= 4 and codigo_produto in codigo:
-            # Um CÓD. PRODUTO pode aparecer em várias variantes; todas elas
-            # representam a mesma descrição/referência base para a análise de grupo.
-            candidatos.append((len(codigo_produto), codigo_produto, infos))
+    if not produto_map:
+        return None
+
+    candidatos = {}
+    n = len(codigo)
+    # Código de produto relevante tem no mínimo 4 dígitos. Testamos maiores
+    # primeiro para privilegiar o vínculo mais específico.
+    min_len = 4
+    for tam in range(n, min_len - 1, -1):
+        for inicio in range(0, n - tam + 1):
+            sub = codigo[inicio:inicio + tam]
+            infos = produto_map.get(sub)
+            if infos:
+                candidatos[sub] = infos
+        if candidatos:
+            # Achou o maior comprimento possível; não precisa procurar menores.
+            break
 
     if not candidatos:
         return None
 
-    maior_tamanho = max(x[0] for x in candidatos)
-    melhores = [x for x in candidatos if x[0] == maior_tamanho]
+    maior_tamanho = max(len(k) for k in candidatos)
+    melhores = [(codigo_produto, infos) for codigo_produto, infos in candidatos.items()
+                if len(codigo_produto) == maior_tamanho]
     if len(melhores) != 1:
-        # Se houver mais de um código de produto de mesmo tamanho dentro do
-        # barcode, só aceitamos quando todas as descrições/referências coincidem.
         assinaturas = set()
-        for _, _, infos in melhores:
+        for _, infos in melhores:
             for i in infos:
                 assinaturas.add((i.get("descricao", ""), i.get("referencia", "")))
         if len(assinaturas) != 1:
             return None
 
-    info_base = melhores[0][2][0].copy()
+    info_base = melhores[0][1][0].copy()
     info_base["origem_match"] = "código do produto"
     return info_base
 
 
 
 def _assinatura_arquivos_rua1(*arquivos):
-    """Cria uma assinatura leve dos arquivos para não recalcular a análise a cada filtro."""
-    h = hashlib.sha1()
+    """Assinatura realmente leve: identifica o upload sem hashear o arquivo inteiro.
+
+    O V10 fazia SHA-1 do conteúdo completo em toda rerenderização. Com CSV/XLSX
+    grandes isso já custa caro antes mesmo do cálculo começar.
+    """
+    partes = []
     for arq in arquivos:
         if arq is None:
-            h.update(b"<none>")
+            partes.append("<none>")
             continue
-        bruto = arq.getvalue()
-        h.update(str(len(bruto)).encode())
-        h.update(bruto)
-    return h.hexdigest()
+        file_id = getattr(arq, "file_id", None)
+        nome = getattr(arq, "name", "")
+        tamanho = getattr(arq, "size", None)
+        if tamanho is None:
+            try:
+                tamanho = len(arq.getvalue())
+            except Exception:
+                tamanho = 0
+        partes.append(f"{file_id or nome}|{tamanho}")
+    return "||".join(partes)
 
 
 def construir_analise_rua1(estoque_total, estoque_rua1, detalhamento, grupos, marcas, mapa_oficial=None):
@@ -3330,7 +3355,7 @@ elif st.session_state.aba_ativa_selecionada == "📊 Análise Rua 1 por Grupo":
             )
 
             if st.session_state.get("rua1_analise_assinatura") != assinatura:
-                with st.spinner("🔄 Calculando a reconciliação da Rua 1 uma vez..."):
+                with st.spinner("🔄 Lendo os arquivos e calculando a Rua 1..."):
                     estoque_total = ler_csv_estoque_upload(arquivo_todas)
                     estoque_r1 = ler_csv_estoque_upload(arquivo_r1)
                     detalhamento = ler_detalhamento_xlsx_upload(arquivo_detalhe)
