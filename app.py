@@ -1732,41 +1732,73 @@ def _assinatura_arquivos_rua1(*arquivos):
 @st.cache_data(show_spinner=False)
 def extrair_catalogo_oficial_produtos_pdf_bytes(pdf_bytes):
     """Lê o RELATÓRIO DE PRODUTOS do SofStore por código de barras.
-    Preserva barcode como texto e extrai referência, descrição e estoque oficial.
+
+    O texto extraído pelo PyMuPDF vem, em geral, nesta ordem:
+    referência -> código de barras -> grade -> estoque -> descrição -> demais campos.
+    Portanto a leitura não pode assumir que o código esteja no começo da mesma linha
+    da descrição.
     """
-    import io
-    rows=[]
     if not pdf_bytes:
         return {}
+
     if FITZ_DISPONIVEL:
-        doc=fitz.open(stream=pdf_bytes, filetype='pdf')
-        textos=[page.get_text('text') or '' for page in doc]
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        textos = [page.get_text("text") or "" for page in doc]
         doc.close()
     elif PYPDF_DISPONIVEL:
-        leitor=pypdf.PdfReader(BytesIO(pdf_bytes))
-        textos=[p.extract_text() or '' for p in leitor.pages]
+        leitor = pypdf.PdfReader(BytesIO(pdf_bytes))
+        textos = [p.extract_text() or "" for p in leitor.pages]
     else:
         return {}
-    # code + ref + desc + estoque ...; description may contain punctuation/spaces.
-    pat=re.compile(r'^\s*(\d{10,14})\s+(\S+)\s+(.*?)\s+(-?\d+(?:[\.,]\d+)?)\s+\d+', re.M)
+
+    barcode_re = re.compile(r"^\s*(\d{10,14})\s*$")
+    numero_re = re.compile(r"^\s*-?\d+(?:[\.,]\d+)?\s*$")
+    out = {}
+
     for text in textos:
-        for line in text.splitlines():
-            line=' '.join(line.split())
-            if not line or not re.match(r'^\d{10,14}\s',line):
+        linhas = [" ".join(line.split()) for line in text.splitlines()]
+        linhas = [line for line in linhas if line]
+
+        for i, line in enumerate(linhas):
+            m_bar = barcode_re.match(line)
+            if not m_bar:
                 continue
-            m=pat.match(line)
-            if not m:
+
+            barcode = m_bar.group(1)
+            referencia = linhas[i - 1].strip() if i > 0 else ""
+
+            # Depois do barcode há normalmente: grade, estoque e descrição.
+            j = i + 1
+            grade = ""
+            if j < len(linhas) and not numero_re.match(linhas[j]):
+                grade = linhas[j]
+                j += 1
+
+            # Primeiro número depois da grade é o estoque exibido no relatório.
+            estoque = 0.0
+            if j < len(linhas) and numero_re.match(linhas[j]):
+                try:
+                    estoque = float(linhas[j].replace(".", "").replace(",", "."))
+                except Exception:
+                    estoque = 0.0
+                j += 1
+
+            if j >= len(linhas):
                 continue
-            barcode=re.sub(r'\D','',m.group(1))
-            if not barcode:
+            descricao = linhas[j].strip()
+
+            # Rejeita falsos positivos: a linha imediatamente anterior precisa
+            # parecer referência de produto (não ser cabeçalho nem número puro).
+            ref_norm = normalizar_texto_analise(referencia)
+            if not ref_norm or ref_norm in {"CODIGO DE BARRAS", "ESTOQUE", "GRADE", "DESCRICAO"}:
                 continue
-            try: qtd=float(m.group(4).replace('.','').replace(',','.'))
-            except Exception: continue
-            rows.append((barcode,m.group(2).strip(),m.group(3).strip(),qtd))
-    # preserve latest occurrence; normally each barcode is unique.
-    out={}
-    for barcode,ref,desc,qtd in rows:
-        out[barcode]={"referencia":ref,"descricao":desc,"estoque_oficial":qtd}
+
+            out[re.sub(r"\D", "", barcode)] = {
+                "referencia": referencia,
+                "descricao": descricao,
+                "estoque_oficial": estoque,
+            }
+
     return out
 
 def _classificar_prefixo_grupo_marca_sem_mapa(descricao, referencia=''):
@@ -1805,57 +1837,152 @@ def _classificar_prefixo_grupo_marca_sem_mapa(descricao, referencia=''):
     return grupo,marca,'prefixo descricao'
 
 def construir_analise_rua1_v13(estoque_total, estoque_rua1, detalhamento, catalogo_pdf):
-    """Reconcilia Rua 1 contra o catálogo oficial do PDF de Produtos.
-    Não exige PDF Grupo x Marca: o oficial vem por código de barras e descrição.
+    """Analisa a Rua 1 por grupo usando somente código de barras como vínculo.
+
+    Regra da análise:
+    - ``estoque_total`` = quantidade física presente no CSV de todas as ruas.
+    - ``estoque_rua1`` = quantidade física presente no CSV da Rua 1.
+    - ``catalogo_pdf`` = cadastro do produto por código de barras, usado apenas
+      para obter descrição/referência e classificar o grupo.
+    - Não reconcilia contra estoque oficial do PDF, não limita localização por
+      grupo/marca e não tenta redistribuir quantidades entre códigos.
     """
-    # merge: PDF é fonte oficial; XLSX é fallback/recuperação de descrição.
-    catalogo=dict(catalogo_pdf or {})
-    for bc,info in (detalhamento or {}).items():
-        if bc not in catalogo:
-            catalogo[bc]={"referencia":info.get('referencia',''),"descricao":info.get('descricao',''),"estoque_oficial":0}
-    detalhes=[]; sem_cad=sem_grupo=sem_marca=conflito=0.0
-    for codigo,qtd in estoque_total.items():
-        qtd=float(qtd); r1=min(float(estoque_rua1.get(codigo,0)),qtd)
-        info=catalogo.get(codigo)
+    catalogo = dict(catalogo_pdf or {})
+    detalhes = []
+    sem_cadastro = 0.0
+    sem_grupo = 0.0
+
+    # O CSV de todas as ruas é a fonte da quantidade. O CSV da Rua 1 somente
+    # informa quanto daquele mesmo código está localizado na Rua 1.
+    total_csv = 0.0
+    total_r1 = 0.0
+
+    for codigo, quantidade_total in (estoque_total or {}).items():
+        qtd_total = float(quantidade_total or 0)
+        qtd_r1 = float((estoque_rua1 or {}).get(codigo, 0) or 0)
+        # Uma inconsistência do CSV da Rua 1 nunca pode criar mais peças do que
+        # o estoque total daquele código.
+        qtd_r1 = max(0.0, min(qtd_r1, qtd_total))
+        qtd_outros = max(qtd_total - qtd_r1, 0.0)
+
+        total_csv += qtd_total
+        total_r1 += qtd_r1
+
+        info = catalogo.get(codigo)
         if info is None:
-            sem_cad += qtd
-            detalhes.append({'codigo':codigo,'qtd':qtd,'r1':r1,'grupo':None,'marca':None,'oficial':0.0,'origem':'sem cadastro'})
+            sem_cadastro += qtd_total
+            detalhes.append({
+                "codigo": codigo,
+                "qtd_total": qtd_total,
+                "qtd_r1": qtd_r1,
+                "qtd_outros": qtd_outros,
+                "grupo": "GRUPO NÃO IDENTIFICADO",
+                "descricao": "",
+                "referencia": "",
+            })
             continue
-        desc=info.get('descricao',''); ref=info.get('referencia','')
-        grupo,marca,origem=_classificar_prefixo_grupo_marca_sem_mapa(desc,ref)
-        if normalizar_texto_analise(desc).startswith(('SACOLA','SUPRIMENTO')):
-            continue
-        if not grupo: sem_grupo += qtd
-        if not marca: sem_marca += qtd
-        detalhes.append({'codigo':codigo,'qtd':qtd,'r1':r1,'grupo':normalizar_texto_analise(grupo) if grupo else None,'marca':normalizar_texto_analise(marca) if marca else None,'oficial':float(info.get('estoque_oficial',0) or 0),'origem':origem})
-    # official is from PDF, grouped by detected group+brand. Allocate locations within the official limits.
-    oficial_map=collections.defaultdict(float)
-    for bc,info in catalogo.items():
-        desc=info.get('descricao','')
-        if normalizar_texto_analise(desc).startswith(('SACOLA','SUPRIMENTO')): continue
-        g,m,_= _classificar_prefixo_grupo_marca_sem_mapa(desc, info.get('referencia',''))
-        if g and m: oficial_map[(normalizar_texto_analise(m),normalizar_texto_analise(g))]+=float(info.get('estoque_oficial',0) or 0)
-    # consume locations, prioritizing Rua 1
-    consumido=collections.defaultdict(float); linhas=[]
-    for d in sorted(detalhes,key=lambda x:(-x['r1'],-x['qtd'])):
-        if not d['grupo'] or not d['marca']: continue
-        chave=(d['marca'],d['grupo']); limite=float(oficial_map.get(chave,0)); saldo=max(limite-consumido[chave],0)
-        r1c=min(d['r1'],saldo); saldo-=r1c; outr=max(d['qtd']-d['r1'],0); oc=min(outr,saldo); conf=r1c+oc; consumido[chave]+=conf; conflito+=max(d['qtd']-conf,0)
-        if conf>0: linhas.append({'Grupo':d['grupo'],'Marca':d['marca'],'Oficial SofStore':limite,'Localizado':conf,'Rua 1':r1c,'Outras Ruas':oc})
-    if linhas:
-        df=pd.DataFrame(linhas).groupby(['Grupo','Marca'],as_index=False)[['Oficial SofStore','Localizado','Rua 1','Outras Ruas']].sum()
-        df['Não localizado']=(df['Oficial SofStore']-df['Localizado']).clip(lower=0)
-        df['% Rua 1']=np.where(df['Oficial SofStore']>0,df['Rua 1']/df['Oficial SofStore']*100,0)
-        df=df.sort_values(['Grupo','Marca']).reset_index(drop=True)
+
+        descricao = str(info.get("descricao", "") or "").strip()
+        referencia = str(info.get("referencia", "") or "").strip()
+        grupo = _grupo_primeiro_bloco_descricao_rua1(descricao, referencia)
+        if not grupo:
+            grupo = "GRUPO NÃO IDENTIFICADO"
+            sem_grupo += qtd_total
+
+        detalhes.append({
+            "codigo": codigo,
+            "qtd_total": qtd_total,
+            "qtd_r1": qtd_r1,
+            "qtd_outros": qtd_outros,
+            "grupo": normalizar_texto_analise(grupo),
+            "descricao": descricao,
+            "referencia": referencia,
+        })
+
+    # Quantidades são agregadas diretamente por grupo. Não há consumo,
+    # prioridade, limite oficial ou ajuste por marca nesta versão.
+    df_detalhes = pd.DataFrame(detalhes)
+    if df_detalhes.empty:
+        df = pd.DataFrame(columns=[
+            "Grupo", "Estoque Total", "Rua 1", "Outras Ruas", "% Rua 1", "Códigos"
+        ])
     else:
-        df=pd.DataFrame(columns=['Grupo','Marca','Oficial SofStore','Localizado','Rua 1','Outras Ruas','Não localizado','% Rua 1'])
-    local_total=sum(d['qtd'] for d in detalhes if not (d['origem']=='sem cadastro' and d['grupo'] is None))
-    local_r1=sum(min(estoque_rua1.get(c,0),estoque_total.get(c,0)) for c in estoque_rua1)
-    oficial_total=sum(oficial_map.values()); confirmado=float(df['Localizado'].sum()) if not df.empty else 0
-    sem_class=max(sem_grupo+sem_marca,0) if not detalhes else 0
-    nao_loc=max(oficial_total-confirmado,0)
-    meta={'local_total':float(local_total),'local_r1':float(local_r1),'local_outros':max(float(local_total)-float(local_r1),0),'oficial_total':float(oficial_total),'confirmado':confirmado,'sem_classificacao':float(sem_class),'nao_localizado':float(nao_loc),'conflito':float(conflito),'sem_cadastro':float(sem_cad),'sem_grupo':float(sem_grupo),'sem_marca':float(sem_marca),'recuperado_produto':0,'fechamento_ok':abs(oficial_total-(confirmado+nao_loc))<0.01}
-    return df,meta
+        df = (
+            df_detalhes.groupby("grupo", as_index=False)
+            .agg(
+                **{
+                    "Estoque Total": ("qtd_total", "sum"),
+                    "Rua 1": ("qtd_r1", "sum"),
+                    "Outras Ruas": ("qtd_outros", "sum"),
+                    "Códigos": ("codigo", "nunique"),
+                }
+            )
+            .rename(columns={"grupo": "Grupo"})
+        )
+        df["% Rua 1"] = np.where(
+            df["Estoque Total"] > 0,
+            df["Rua 1"] / df["Estoque Total"] * 100,
+            0,
+        )
+        df = df[["Grupo", "Estoque Total", "Rua 1", "Outras Ruas", "% Rua 1", "Códigos"]]
+        df = df.sort_values(["Rua 1", "Estoque Total"], ascending=[False, False]).reset_index(drop=True)
+
+    local_outros = max(total_csv - total_r1, 0.0)
+    total_calculado = float(df["Estoque Total"].sum()) if not df.empty else 0.0
+    fechamento_ok = abs(total_calculado - total_csv) < 0.01 and abs((total_r1 + local_outros) - total_csv) < 0.01
+
+    meta = {
+        # Chaves mantidas para compatibilidade com outras partes do aplicativo.
+        # Nesta análise, o “oficial” é o total físico importado do CSV.
+        "oficial_total": total_csv,
+        "confirmado": total_csv,
+        "local_total": total_csv,
+        "local_r1": total_r1,
+        "local_outros": local_outros,
+        "nao_localizado": 0.0,
+        "conflito": 0.0,
+        "sem_cadastro": sem_cadastro,
+        "sem_grupo": sem_grupo,
+        "sem_marca": 0.0,
+        "sem_classificacao": sem_grupo,
+        "recuperado_produto": 0.0,
+        "fechamento_ok": fechamento_ok,
+        "codigos_total": len(estoque_total or {}),
+        "codigos_rua1": len((estoque_rua1 or {})),
+        "grupos": int(df["Grupo"].nunique()) if not df.empty else 0,
+    }
+
+    return df, meta
+
+
+def _grupo_primeiro_bloco_descricao_rua1(descricao, referencia=""):
+    """Obtém o grupo pelo início da descrição do produto.
+
+    O cadastro do SofStore coloca o grupo/família antes da marca. Para evitar
+    transformar uma expressão composta (ex.: ``CAMISA MANGA LONGA``) em grupo
+    diferente a cada variação, primeiro tentamos reconhecer os grupos compostos
+    mais comuns; caso contrário, usamos o primeiro bloco textual da descrição.
+    """
+    desc = normalizar_texto_analise(descricao)
+    if not desc:
+        # O campo referência não substitui a descrição, mas serve como fallback
+        # quando a linha do cadastro vier sem descrição.
+        ref = normalizar_texto_analise(referencia)
+        return ref.split()[0] if ref else None
+
+    grupos_compostos = [
+        "CAMISA MANGA LONGA", "CAMISA MANGA CURTA",
+        "BLUSA MANGA LONGA", "BLUSA MANGA CURTA",
+        "VESTIDO LONGO", "VESTIDO CURTO",
+        "CALCA JOGGER", "CALCA MOLETOM", "CALCA JEANS", "CALCA SARJA",
+    ]
+    for grupo in grupos_compostos:
+        if desc == grupo or desc.startswith(grupo + " "):
+            # O grupo operacional continua sendo o primeiro termo da descrição.
+            return grupo.split()[0]
+
+    token = desc.split()[0] if desc.split() else ""
+    return token or None
 
 def construir_analise_rua1(estoque_total, estoque_rua1, detalhamento, grupos, marcas, mapa_oficial=None):
     """Classificação/localização por código de barras.
@@ -3464,56 +3591,130 @@ elif st.session_state.aba_ativa_selecionada == "🚚 Expedição (Teste)":
 
 
 # ==========================================
-# TELA 3.4.5: ANÁLISE DE ESTOQUE POR GRUPO / MARCA / RUA 1
+# TELA 3.4.5: ANÁLISE DE ESTOQUE POR GRUPO / RUA 1
 elif st.session_state.aba_ativa_selecionada == "📊 Análise Rua 1 por Grupo":
     st.markdown("<h3 style='text-align: center; color: #ffcc00;'>📊 Análise de Estoque — Rua 1 x Demais Ruas</h3>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align:center;color:#8892b0;'>O <b>PDF oficial de produtos</b> é a base principal desta análise. Os CSVs determinam a localização. O XLSX não é usado nesta etapa. Classificação: <b>Grupo → Marca → demais informações</b>.</p>", unsafe_allow_html=True)
-    col_a1,col_a2,col_a3=st.columns(3)
-    with col_a1: arquivo_todas=st.file_uploader("📦 CSV — Todas as Ruas",type=['csv'],key='analise_todas_ruas')
-    with col_a2: arquivo_r1=st.file_uploader("1️⃣ CSV — Rua 1",type=['csv'],key='analise_rua1')
-    with col_a3: arquivo_grupos=st.file_uploader("📋 PDF — Relatório Oficial de Produtos",type=['pdf'],key='analise_pdf_grupos')
+    st.markdown(
+        "<p style='text-align:center;color:#8892b0;'>"
+        "A quantidade vem dos <b>CSVs de estoque</b>. O PDF de produtos é usado somente para descobrir o <b>grupo pelo código de barras</b>. "
+        "Não há reconciliação por marca nem limite de estoque do PDF.</p>",
+        unsafe_allow_html=True,
+    )
+
+    col_a1, col_a2, col_a3 = st.columns(3)
+    with col_a1:
+        arquivo_todas = st.file_uploader("📦 CSV — Todas as Ruas", type=["csv"], key="analise_todas_ruas")
+    with col_a2:
+        arquivo_r1 = st.file_uploader("1️⃣ CSV — Rua 1", type=["csv"], key="analise_rua1")
+    with col_a3:
+        arquivo_grupos = st.file_uploader("📋 PDF — Relatório de Produtos", type=["pdf"], key="analise_pdf_grupos")
+
     if arquivo_todas and arquivo_r1 and arquivo_grupos:
         try:
-            # A assinatura desta tela considera SOMENTE os 3 arquivos efetivamente usados.
-            assinatura=_assinatura_arquivos_rua1(arquivo_todas,arquivo_r1,arquivo_grupos)
-            if st.session_state.get('rua1_analise_assinatura')!=assinatura:
-                with st.spinner('🔄 Calculando Rua 1 com o PDF oficial...'):
-                    estoque_total=ler_csv_estoque_upload(arquivo_todas)
-                    estoque_r1=ler_csv_estoque_upload(arquivo_r1)
-                    # O PDF é a única fonte cadastral/oficial desta análise; não há fallback para XLSX.
-                    catalogo_pdf=extrair_catalogo_oficial_produtos_pdf_bytes(arquivo_grupos.getvalue())
+            assinatura = _assinatura_arquivos_rua1(arquivo_todas, arquivo_r1, arquivo_grupos)
+            if st.session_state.get("rua1_analise_assinatura") != assinatura:
+                with st.spinner("🔄 Cruzando códigos de barras da Rua 1 com o estoque geral..."):
+                    estoque_total = ler_csv_estoque_upload(arquivo_todas)
+                    estoque_r1 = ler_csv_estoque_upload(arquivo_r1)
+                    catalogo_pdf = extrair_catalogo_oficial_produtos_pdf_bytes(arquivo_grupos.getvalue())
                     if not catalogo_pdf:
-                        raise ValueError('Não consegui extrair produtos do PDF oficial. Verifique se o arquivo é o Relatório de Produtos do SofStore.')
-                    df_calc,meta_calc=construir_analise_rua1_v13(estoque_total,estoque_r1,{},catalogo_pdf)
-                    st.session_state.rua1_analise_df=df_calc; st.session_state.rua1_analise_meta=meta_calc; st.session_state.rua1_analise_erro=None; st.session_state.rua1_analise_assinatura=assinatura
-            df_analise=st.session_state.get('rua1_analise_df'); meta=st.session_state.get('rua1_analise_meta')
-            if df_analise is None or meta is None: st.warning('Nenhuma análise disponível.')
+                        raise ValueError(
+                            "Não consegui extrair produtos do PDF. Verifique se o arquivo é o 'Relatório de Produtos' do SofStore."
+                        )
+
+                    df_calc, meta_calc = construir_analise_rua1_v13(
+                        estoque_total,
+                        estoque_r1,
+                        {},
+                        catalogo_pdf,
+                    )
+                    st.session_state.rua1_analise_df = df_calc
+                    st.session_state.rua1_analise_meta = meta_calc
+                    st.session_state.rua1_analise_erro = None
+                    st.session_state.rua1_analise_assinatura = assinatura
+
+            df_analise = st.session_state.get("rua1_analise_df")
+            meta = st.session_state.get("rua1_analise_meta")
+
+            if df_analise is None or meta is None:
+                st.warning("Nenhuma análise disponível.")
             else:
-                k1,k2,k3,k4=st.columns(4); k1.metric('🎯 Estoque oficial',f"{meta['oficial_total']:,.0f}"); k2.metric('📍 Localizado',f"{meta['local_total']:,.0f}"); k3.metric('1️⃣ Rua 1',f"{meta['local_r1']:,.0f}"); k4.metric('📌 Outras ruas',f"{meta['local_outros']:,.0f}")
-                k5,k6,k7,k8=st.columns(4); k5.metric('🔍 Não localizado',f"{meta['nao_localizado']:,.0f}"); k6.metric('⚠️ Sem cadastro no PDF',f"{meta['sem_cadastro']:,.0f}"); k7.metric('⚠️ Sem grupo/marca',f"{meta['sem_grupo']+meta['sem_marca']:,.0f}"); k8.metric('✅ Fechamento','OK' if meta['fechamento_ok'] else 'REVISAR')
-                if meta['fechamento_ok']: st.success(f"✅ Oficial {meta['oficial_total']:,.0f} = localizado {meta['confirmado']:,.0f} + não localizado {meta['nao_localizado']:,.0f}.")
-                else: st.warning('⚠️ O fechamento não foi forçado; diferenças continuam visíveis para auditoria.')
-                grupos=sorted(df_analise['Grupo'].unique().tolist()) if not df_analise.empty else []; marcas=sorted(df_analise['Marca'].unique().tolist()) if not df_analise.empty else []
-                f1,f2=st.columns(2)
-                with f1: grupo_filtro=st.selectbox('Filtrar por grupo',['Todos']+grupos,key='filtro_analise_grupo')
-                with f2: marca_filtro=st.selectbox('Filtrar por marca',['Todas']+marcas,key='filtro_analise_marca')
-                df_view=df_analise
-                if grupo_filtro!='Todos': df_view=df_view[df_view['Grupo']==grupo_filtro]
-                if marca_filtro!='Todas': df_view=df_view[df_view['Marca']==marca_filtro]
-                st.markdown('#### 📋 Estoque oficial × localização')
-                st.dataframe(df_view.style.format({'Oficial SofStore':'{:,.0f}','Localizado':'{:,.0f}','Rua 1':'{:,.0f}','Outras Ruas':'{:,.0f}','Não localizado':'{:,.0f}','% Rua 1':'{:.1f}%'}),use_container_width=True,hide_index=True)
-                st.markdown('#### 📊 Rua 1 × Outras ruas')
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("📦 Estoque total", f"{meta['local_total']:,.0f}")
+                k2.metric("1️⃣ Rua 1", f"{meta['local_r1']:,.0f}")
+                k3.metric("📌 Outras ruas", f"{meta['local_outros']:,.0f}")
+                k4.metric("✅ Fechamento", "OK" if meta["fechamento_ok"] else "REVISAR")
+
+                k5, k6, k7, k8 = st.columns(4)
+                k5.metric("🧾 Códigos no estoque", f"{meta['codigos_total']:,}")
+                k6.metric("1️⃣ Códigos Rua 1", f"{meta['codigos_rua1']:,}")
+                k7.metric("🏷️ Grupos", f"{meta['grupos']:,}")
+                k8.metric("⚠️ Sem cadastro no PDF", f"{meta['sem_cadastro']:,.0f}")
+
+                if meta["fechamento_ok"]:
+                    st.success(
+                        f"✅ Fechamento correto: {meta['local_total']:,.0f} peças = "
+                        f"{meta['local_r1']:,.0f} na Rua 1 + {meta['local_outros']:,.0f} nas outras ruas."
+                    )
+                else:
+                    st.warning("⚠️ O fechamento entre estoque total, Rua 1 e outras ruas precisa ser revisado.")
+
+                grupos = sorted(df_analise["Grupo"].dropna().unique().tolist()) if not df_analise.empty else []
+                f1, f2, f3 = st.columns([2, 1, 1])
+                with f1:
+                    grupo_filtro = st.selectbox("Filtrar por grupo", ["Todos"] + grupos, key="filtro_analise_grupo")
+                with f2:
+                    minimo_r1 = st.number_input("Mínimo de peças na Rua 1", min_value=0, value=0, step=1, key="filtro_min_r1")
+                with f3:
+                    ordenar_por = st.selectbox(
+                        "Ordenar por",
+                        ["Rua 1", "Estoque Total", "% Rua 1"],
+                        key="ordenacao_analise_rua1",
+                    )
+
+                df_view = df_analise.copy()
+                if grupo_filtro != "Todos":
+                    df_view = df_view[df_view["Grupo"] == grupo_filtro]
+                df_view = df_view[df_view["Rua 1"] >= minimo_r1]
+
+                coluna_ordenacao = ordenar_por if ordenar_por != "% Rua 1" else "% Rua 1"
+                df_view = df_view.sort_values(coluna_ordenacao, ascending=False).reset_index(drop=True)
+
+                st.markdown("#### 📋 Quantidade por grupo")
+                st.dataframe(
+                    df_view.style.format({
+                        "Estoque Total": "{:,.0f}",
+                        "Rua 1": "{:,.0f}",
+                        "Outras Ruas": "{:,.0f}",
+                        "% Rua 1": "{:.1f}%",
+                        "Códigos": "{:,.0f}",
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                botao_exportar_excel(df_view, "analise_rua1_por_grupo.xlsx", key="export_analise_rua1_grupo")
+
+                st.markdown("#### 📊 Rua 1 × Outras ruas por grupo")
                 if not df_view.empty:
-                    resumo=df_view.groupby('Grupo',as_index=False)[['Rua 1','Outras Ruas']].sum().sort_values('Rua 1',ascending=False); st.bar_chart(resumo.set_index('Grupo')[['Rua 1','Outras Ruas']])
-                with st.expander('🔎 Auditoria'):
-                    st.write(f"Códigos/peças sem cadastro no PDF: {meta['sem_cadastro']:,.0f}")
-                    st.write(f"Peças sem grupo: {meta['sem_grupo']:,.0f}")
-                    st.write(f"Peças sem marca: {meta['sem_marca']:,.0f}")
-                    st.write(f"Conflito/excesso de localização: {meta['conflito']:,.0f}")
+                    resumo = df_view.set_index("Grupo")[["Rua 1", "Outras Ruas"]]
+                    st.bar_chart(resumo)
+                else:
+                    st.info("Nenhum grupo atende aos filtros selecionados.")
+
+                with st.expander("🔎 Auditoria da análise"):
+                    st.write(f"Quantidade total lida no CSV de todas as ruas: **{meta['local_total']:,.0f}**")
+                    st.write(f"Quantidade lida no CSV da Rua 1: **{meta['local_r1']:,.0f}**")
+                    st.write(f"Quantidade calculada nas outras ruas: **{meta['local_outros']:,.0f}**")
+                    st.write(f"Peças sem cadastro correspondente no PDF: **{meta['sem_cadastro']:,.0f}**")
+                    st.write(f"Peças sem grupo identificável: **{meta['sem_grupo']:,.0f}**")
+                    st.caption(
+                        "O PDF não limita o resultado. Ele serve para vincular código de barras → descrição → grupo. "
+                        "A divisão Rua 1 / outras ruas é feita diretamente pelos dois CSVs."
+                    )
         except Exception as e:
             st.error(f"❌ Não foi possível processar os arquivos: {e}")
     else:
-        st.info('Envie os três arquivos: Todas as Ruas, Rua 1 e o PDF oficial de Produtos.')
+        st.info("Envie os três arquivos: Todas as Ruas, Rua 1 e o PDF de Produtos.")
 
 # ==========================================
 # TELA 3.5: ESTATÍSTICAS DE CASULOS (RAIO-X DA ESTRUTURA)
