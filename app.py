@@ -1167,9 +1167,18 @@ def classificar_grupo_analise(descricao, referencia, grupos):
         return grupos_norm.get(normalizar_texto_analise(nome))
 
     def gen():
-        if any(x in tokens for x in ('FEM','FEMIN','FEMININO')):
+        # O SofStore frequentemente cola FEM/MASC no final do nome/modelo:
+        # por exemplo CS02011JMASC, BLNY1679YFEM, PL-5952 FEM.
+        # Primeiro usa tokens normais; depois procura as marcações em qualquer posição.
+        if any(x in tokens for x in ('FEM','FEMIN','FEMININO')) or re.search(r'FEM(?:ININO)?$', texto.replace(' ', '')):
             return 'FEMIN'
-        if any(x in tokens for x in ('MASC','MASCULINO')):
+        if any(x in tokens for x in ('MASC','MASCULINO')) or re.search(r'MASC(?:ULINO)?$', texto.replace(' ', '')):
+            return 'MASC'
+        # Procura a marcação em qualquer ponto, desde que não seja parte de uma
+        # palavra comum; isso cobre códigos concatenados do cadastro.
+        if re.search(r'FEM(?:IN)?', texto):
+            return 'FEMIN'
+        if re.search(r'MASC(?:ULINO)?', texto):
             return 'MASC'
         return None
 
@@ -1178,6 +1187,10 @@ def classificar_grupo_analise(descricao, referencia, grupos):
     # Segmento de referência: no padrão xx.xxx.99.SEG.CODIGO
     partes_ref = str(referencia or '').split('.')
     seg4 = partes_ref[3] if len(partes_ref) >= 4 else ''
+
+    # Segmento 01 também aparece nas bermudas jeans masculinas do cadastro.
+    if 'BERMUDA' in tokens and seg4 == '01' and existe('BERMUDA JEANS MASC'):
+        return existe('BERMUDA JEANS MASC')
 
     # Correções de grafia/comercial
     if 'CAMSIETA' in tokens:
@@ -1206,7 +1219,7 @@ def classificar_grupo_analise(descricao, referencia, grupos):
                 '20': 'BERMUDA NYLON MASC',
                 '23': 'BERMUDA SARJA MASC',
                 '24': 'BERMUDA LINHO MASC',
-                '40': 'BERMUDA JEANS MASC',
+                '40': 'BERMUDA JEANS MASC', '01': 'BERMUDA JEANS MASC',
             }
             alvo = mapa_m.get(seg4)
             if alvo and existe(alvo):
@@ -1239,7 +1252,7 @@ def classificar_grupo_analise(descricao, referencia, grupos):
                 '20': 'BERMUDA NYLON MASC',
                 '23': 'BERMUDA SARJA MASC',
                 '24': 'BERMUDA LINHO MASC',
-                '40': 'BERMUDA JEANS MASC',
+                '40': 'BERMUDA JEANS MASC', '01': 'BERMUDA JEANS MASC',
             }.get(seg4)
         else:
             alvo = None
@@ -1299,6 +1312,56 @@ def classificar_grupo_analise(descricao, referencia, grupos):
     for alvo in familias:
         if alvo and existe(alvo):
             return existe(alvo)
+
+    # Casos de roupas/acessórios que aparecem com nomes comerciais
+    # específicos no cadastro. Só usa o mapeamento quando o grupo oficial
+    # correspondente existir no PDF, evitando inventar grupos novos.
+    especiais = [
+        ('PARKA', 'JAQUETA FEMIN' if genero == 'FEMIN' else 'JAQUETA MASC' if genero == 'MASC' else None),
+        ('SPENCER', 'BLAZER FEMIN' if genero == 'FEMIN' else 'BLAZER MASC' if genero == 'MASC' else None),
+        ('BUSTO', 'ACESSORIO FEMIN' if genero == 'FEMIN' else 'ACESSORIO MASC' if genero == 'MASC' else None),
+        ('KAFTAN', 'SAIDA PRAIA / QUIMONO FEMIN' if genero == 'FEMIN' else None),
+        ('ECHARPE', 'ACESSORIO FEMIN' if genero == 'FEMIN' else 'ACESSORIO MASC' if genero == 'MASC' else None),
+        ('MANTELA', 'ACESSORIO FEMIN' if genero == 'FEMIN' else 'ACESSORIO MASC' if genero == 'MASC' else None),
+        ('CASAQUETO', 'JAQUETA FEMIN' if genero == 'FEMIN' else 'JAQUETA MASC' if genero == 'MASC' else None),
+    ]
+    for palavra, alvo in especiais:
+        if palavra in tokens and alvo and existe(alvo):
+            return existe(alvo)
+
+    # Outras nomenclaturas presentes no cadastro que têm grupo oficial claro.
+    if 'T-SHIRT' in texto or 'TSHIRT' in texto:
+        alvo='CAMISETA FEMIN' if genero == 'FEMIN' else 'CAMISETA MC MASC' if genero == 'MASC' else None
+        if alvo and existe(alvo): return existe(alvo)
+    if 'BLUSAO' in tokens:
+        alvo='BLUSA FEMIN' if genero == 'FEMIN' else 'BLUSA MASC' if genero == 'MASC' else None
+        if alvo and existe(alvo): return existe(alvo)
+    if 'SALOPETE' in tokens:
+        if existe('VESTIDO UNICO FEMIN') and genero == 'FEMIN': return existe('VESTIDO UNICO FEMIN')
+    if 'LEGGING' in tokens and existe('CALÇA TECIDO FEMIN') and genero == 'FEMIN': return existe('CALÇA TECIDO FEMIN')
+    if 'MOCHILA' in tokens and existe('MOCHILA / BOLSA MASC') and genero == 'MASC': return existe('MOCHILA / BOLSA MASC')
+    if 'PORTA' in tokens and 'CARTAO' in tokens and existe('CARTEIRA MASC') and genero == 'MASC': return existe('CARTEIRA MASC')
+    if any(x in tokens for x in ('VISEIRA','CHAPEU','LACO','LACO')) and existe('ACESSORIO FEMIN') and genero == 'FEMIN': return existe('ACESSORIO FEMIN')
+    if 'CAL A' in texto: tokens.add('CALCA')
+    if 'TUNICA' in tokens and existe('BLUSA FEMIN') and genero == 'FEMIN': return existe('BLUSA FEMIN')
+    # Referência 52 identifica consistentemente blusas femininas no cadastro
+    # (ex.: DOT 0611), mesmo quando o nome não traz FEM.
+    if 'BLUSA' in tokens and seg4 == '52' and existe('BLUSA FEMIN'):
+        return existe('BLUSA FEMIN')
+
+    # Alias simples: o relatório pode registrar "DOT CLOTHING", enquanto o
+    # produto usa apenas "DOT". Usa a primeira palavra da marca quando isso
+    # gera um único grupo oficial compatível com a família do produto.
+    fams=('BERMUDA','CHINELO','BLUSA','CAMISETA','CAMISA','CALCA','BLAZER','CASACO','JAQUETA','CONJUNTO','MOLETOM','COLETE','CUECA','GRAVATA','BOLSA','OCULOS','CARTEIRA','MEIA','PIJAMA','BODY','MACACAO','MACAQUINHO','SAIA','BIQUINI','MAIO')
+    fam=[x for x in fams if x in tokens]
+    if fam and MAPA_MARCA_GRUPOS_ULTIMO:
+        cand=[]
+        for nm, gs in MAPA_MARCA_GRUPOS_ULTIMO.items():
+            partes=nm.split()
+            if partes and len(partes[0]) >= 4 and re.search(r'\b'+re.escape(partes[0])+r'\b', texto):
+                cand.extend(gs)
+        comp=[g for g in set(cand) if any(ft in normalizar_texto_analise(g) for ft in fam)]
+        if len(comp)==1 and existe(comp[0]): return existe(comp[0])
 
     # Família principal.
     familia = None
