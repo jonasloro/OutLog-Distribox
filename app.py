@@ -2149,37 +2149,66 @@ def extrair_reconciliacao_oficial_pdf_upload(arquivo):
     Lê o relatório oficial RESUMO DE ESTOQUE DO GRUPO e calcula o estoque
     oficial válido para a análise, excluindo APENAS SACOLA e SUPRIMENTO.
 
-    Retorna:
-      total_bruto_sofstore
-      sacolas
-      suprimentos
-      total_oficial_analisavel
+    O PDF do SofStore pode ser extraído pelo pypdf com a quantidade colada
+    no final da mesma linha após os valores de custo/venda. Por isso o parser
+    usa o ÚLTIMO número inteiro da linha, em vez de depender de "TOTAL 170400".
     """
     if arquivo is None or not PYPDF_DISPONIVEL:
         return None
+
     leitor = pypdf.PdfReader(BytesIO(arquivo.getvalue()))
-    texto = "\n".join(page.extract_text() or "" for page in leitor.pages)
+    paginas = [(page.extract_text(extraction_mode="layout") or "") for page in leitor.pages]
+    texto = "\n".join(paginas)
 
-    def extrair_quantidade_linha(nome):
-        # O extrator do PDF costuma colar a quantidade no final da linha:
-        # SACOLA ... 19970
-        padrao = rf"(?mi)^\s*{re.escape(nome)}\b.*?(\d+)\s*$"
-        valores = [int(x) for x in re.findall(padrao, texto)]
-        return max(valores) if valores else 0
+    def quantidade_da_linha(linha):
+        # Com extraction_mode="layout", o SofStore normalmente preserva:
+        # SACOLA   19970   71.095,94   71.095,94
+        # TOTAL    170400  6.605.048,01 28.330.389,76
+        # A quantidade é o PRIMEIRO inteiro após o prefixo.
+        resto = re.sub(r"^[^A-Za-zÀ-ÿ]+", "", linha.strip())
+        tokens = resto.split()
+        if not tokens:
+            return 0
+        tokens = tokens[1:]  # remove o prefixo
+        for t in tokens:
+            if re.fullmatch(r"\d{1,3}(?:\.\d{3})*", t) or re.fullmatch(r"\d+", t):
+                return int(t.replace(".", ""))
+        return 0
 
-    total_match = re.findall(r"(?mi)^\s*TOTAL\s+(\d+)\s+", texto)
-    total_bruto = int(total_match[-1]) if total_match else 0
-    sacolas = extrair_quantidade_linha("SACOLA")
-    suprimentos = extrair_quantidade_linha("SUPRIMENTO")
+    def quantidades_por_prefixo(prefixo):
+        vals = []
+        for linha in texto.splitlines():
+            linha_norm = " ".join(linha.split()).strip()
+            if re.match(rf"^{re.escape(prefixo)}\b", linha_norm, flags=re.I):
+                q = quantidade_da_linha(linha_norm)
+                if q > 0:
+                    vals.append(q)
+        return vals
+
+    # Total: procurar todas as linhas que começam com TOTAL e usar a última.
+    totais = quantidades_por_prefixo("TOTAL")
+    total_bruto = totais[-1] if totais else 0
+
+    # Fallback adicional: procurar TOTAL mesmo quando o extrator não preserva
+    # exatamente a quebra de linha.
+    if total_bruto <= 0:
+        m = re.findall(r"(?mi)^\s*TOTAL\b.*?(\d+)\s*$", texto)
+        if m:
+            total_bruto = int(m[-1])
+
+    sacolas = sum(quantidades_por_prefixo("SACOLA"))
+    suprimentos = sum(quantidades_por_prefixo("SUPRIMENTO"))
 
     if total_bruto <= 0:
-        raise ValueError("Não consegui localizar o TOTAL do relatório oficial de Grupo x Marca.")
-    if sacolas < 0 or suprimentos < 0:
-        raise ValueError("Valores inválidos de SACOLA/SUPRIMENTO no relatório oficial.")
+        raise ValueError(
+            "Não consegui localizar o TOTAL do relatório oficial. "
+            "Tente gerar o PDF novamente mantendo o formato original do SofStore."
+        )
 
     total_analisavel = total_bruto - sacolas - suprimentos
     if total_analisavel < 0:
         raise ValueError("SACOLA + SUPRIMENTO ultrapassam o TOTAL oficial.")
+
     return {
         "total_bruto_sofstore": total_bruto,
         "sacolas": sacolas,
