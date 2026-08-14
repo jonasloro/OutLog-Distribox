@@ -1137,7 +1137,7 @@ def extrair_grupos_marcas_pdf_upload(arquivo):
     vistos = set()
     for grupo in grupos:
         chave = normalizar_texto_analise(grupo)
-        if chave in {"", "RESUMO DE ESTOQUE DO GRUPO", "DESCRICAO", "CUSTO", "VENDAESTOQUE", "CD", "TOTAL P"}:
+        if chave in {"", "RESUMO DE ESTOQUE DO GRUPO", "RESUMO DE ESTOQUE", "DESCRICAO", "CUSTO", "VENDAESTOQUE", "CD", "TOTAL P", "GRUPO"}:
             continue
         if chave not in vistos:
             vistos.add(chave)
@@ -1388,29 +1388,48 @@ def encontrar_detalhamento_por_codigo(codigo, detalhamento):
         return info
 
     produto_map = detalhamento.get("__produto_map__", {})
+
+    # No export do SofStore, o CÓD. PRODUTO aparece embutido no barcode,
+    # normalmente logo após o primeiro dígito (ex.: 0 + 21346 + 99017).
+    # Primeiro tentamos essa posição determinística; depois tentamos as
+    # demais posições como fallback. Isso evita ambiguidades causadas por
+    # procurar qualquer substring dentro do código.
+    comprimentos = sorted({len(k) for k in produto_map if len(k) >= 4}, reverse=True)
     candidatos = []
-    for codigo_produto, infos in produto_map.items():
-        if len(codigo_produto) >= 4 and codigo_produto in codigo:
-            # Um CÓD. PRODUTO pode aparecer em várias variantes; todas elas
-            # representam a mesma descrição/referência base para a análise de grupo.
-            candidatos.append((len(codigo_produto), codigo_produto, infos))
+
+    for tamanho in comprimentos:
+        possiveis = []
+        if len(codigo) >= tamanho + 1:
+            possiveis.append(codigo[1:1+tamanho])
+        if len(codigo) >= tamanho:
+            possiveis.append(codigo[:tamanho])
+        for pos in possiveis:
+            if pos in produto_map:
+                candidatos.append((tamanho, pos, produto_map[pos]))
+        if candidatos:
+            maior = max(x[0] for x in candidatos)
+            candidatos = [x for x in candidatos if x[0] == maior]
+            break
 
     if not candidatos:
+        # Último fallback: substring, mas somente quando houver uma única
+        # correspondência de produto possível para aquele barcode.
+        for codigo_produto, infos in produto_map.items():
+            if len(codigo_produto) >= 5 and codigo_produto in codigo:
+                candidatos.append((len(codigo_produto), codigo_produto, infos))
+        if not candidatos:
+            return None
+        maior = max(x[0] for x in candidatos)
+        candidatos = [x for x in candidatos if x[0] == maior]
+
+    assinaturas = set()
+    for _, _, infos in candidatos:
+        for i in infos:
+            assinaturas.add((i.get("descricao", ""), i.get("referencia", "")))
+    if len(assinaturas) != 1:
         return None
 
-    maior_tamanho = max(x[0] for x in candidatos)
-    melhores = [x for x in candidatos if x[0] == maior_tamanho]
-    if len(melhores) != 1:
-        # Se houver mais de um código de produto de mesmo tamanho dentro do
-        # barcode, só aceitamos quando todas as descrições/referências coincidem.
-        assinaturas = set()
-        for _, _, infos in melhores:
-            for i in infos:
-                assinaturas.add((i.get("descricao", ""), i.get("referencia", "")))
-        if len(assinaturas) != 1:
-            return None
-
-    info_base = melhores[0][2][0].copy()
+    info_base = candidatos[0][2][0].copy()
     info_base["origem_match"] = "código do produto"
     return info_base
 
