@@ -1153,130 +1153,219 @@ def extrair_grupos_marcas_pdf_upload(arquivo):
     return grupos_unicos, marcas_unicas
 
 
-def classificar_grupo_analise(descricao, referencia, grupos):
-    """Classifica usando os nomes oficiais do SofStore.
 
-    Estratégia em camadas:
-    1) regras determinísticas para grupos ambíguos;
-    2) normalização de abreviações/grafias;
-    3) casamento por família + gênero/material;
-    4) pontuação por tokens para pequenos desvios de cadastro.
-    Quando a evidência não é suficiente, retorna None em vez de inventar.
+def classificar_grupo_analise(descricao, referencia, grupos):
+    """Classifica o grupo oficial do SofStore com regras determinísticas.
+    Usa descrição + referência; quando a descrição é genérica, códigos de
+    referência do próprio cadastro ajudam a separar subclasses.
     """
     texto = normalizar_texto_analise(f"{descricao} {referencia}")
-    texto = re.sub(r'\bCAMSIETA\b', 'CAMISETA', texto)
-    texto = re.sub(r'\bT[- ]?SHIRT\b', 'CAMISETA', texto)
-    texto = re.sub(r'\bCALCA\b', 'CALCA', texto)
     tokens = set(texto.split())
     grupos_norm = {normalizar_texto_analise(g): g for g in grupos}
 
     def existe(nome):
         return grupos_norm.get(normalizar_texto_analise(nome))
 
-    def genero():
-        if any(x in tokens for x in ('FEM', 'FEMIN', 'FEMININO')):
+    def gen():
+        if any(x in tokens for x in ('FEM','FEMIN','FEMININO')):
             return 'FEMIN'
-        if any(x in tokens for x in ('MASC', 'MASCULINO')):
+        if any(x in tokens for x in ('MASC','MASCULINO')):
             return 'MASC'
         return None
-    gen = genero()
 
-    # Fronteiras muito claras
-    regras_prefixo = [
-        (('VESTIDO', 'LONGO'), 'VESTIDO LONGO FEMIN'),
-        (('VESTIDO', 'CURTO'), 'VESTIDO CURTO FEMIN'),
-        (('VESTIDO', 'MIDI'), 'VESTIDO MIDI FEMIN'),
-        (('VESTIDO',), 'VESTIDO UNICO FEMIN'),
-        (('SAIA','JEANS'), 'SAIA JEANS FEMIN'),
-        (('SAIA',), 'SAIA TECIDO FEMIN'),
-        (('BIQUINI',), 'BIQUINI / MAIO FEMIN'),
-        (('MAIO',), 'BIQUINI / MAIO FEMIN'),
-        (('KIMONO',), 'SAIDA PRAIA / QUIMONO FEMIN'),
-        (('SAIDA','PRAIA'), 'SAIDA PRAIA / QUIMONO FEMIN'),
-    ]
-    for need, grupo in regras_prefixo:
-        if all(n in tokens for n in need):
-            g = existe(grupo)
-            if g:
-                return g
+    genero = gen()
 
-    familia = None
-    # Família principal e subfamílias determinadas por palavras fortes
+    # Segmento de referência: no padrão xx.xxx.99.SEG.CODIGO
+    partes_ref = str(referencia or '').split('.')
+    seg4 = partes_ref[3] if len(partes_ref) >= 4 else ''
+
+    # Correções de grafia/comercial
+    if 'CAMSIETA' in tokens:
+        tokens.discard('CAMSIETA'); tokens.add('CAMISETA')
+    if 'T-SHIRT' in texto or 'TSHIRT' in texto:
+        tokens.add('CAMISETA')
+
+    # Regras de referência observadas nos cadastros do SofStore.
+    # CAMISA masculina: 35 = manga curta, 06 = manga longa.
+    if 'CAMISA' in tokens and genero == 'MASC':
+        if seg4 == '35' and existe('CAMISA MC MASC'):
+            return existe('CAMISA MC MASC')
+        if seg4 == '06' and existe('CAMISA ML MASC'):
+            return existe('CAMISA ML MASC')
+    # CAMISA feminina: 56/61 aparecem no cadastro de camisas femininas.
+    if 'CAMISA' in tokens and genero == 'FEMIN':
+        if seg4 in {'56','61'} and existe('CAMISA CHEMISE FEMIN'):
+            return existe('CAMISA CHEMISE FEMIN')
+
+    # SHORT / SHORTS: o SofStore não os usa como grupo separado.
+    # O segmento de referência separa os materiais masculinos.
+    if ('SHORT' in tokens or 'SHORTS' in tokens):
+        if genero == 'MASC':
+            mapa_m = {
+                '19': 'BERMUDA MOLETOM MASC',
+                '20': 'BERMUDA NYLON MASC',
+                '23': 'BERMUDA SARJA MASC',
+                '24': 'BERMUDA LINHO MASC',
+                '40': 'BERMUDA JEANS MASC',
+            }
+            alvo = mapa_m.get(seg4)
+            if alvo and existe(alvo):
+                return existe(alvo)
+        elif genero == 'FEMIN':
+            # Nos cadastros femininos, segmentos 51/75 aparecem junto de
+            # bermudas jeans; os demais casos ficam como tecido.
+            if seg4 in {'51','75','40'} and existe('BERMUDA JEANS FEMIN'):
+                return existe('BERMUDA JEANS FEMIN')
+            if existe('BERMUDA TECIDO FEMIN'):
+                return existe('BERMUDA TECIDO FEMIN')
+
+    # BERMUDA genérica: material explícito primeiro, depois segmento.
     if 'BERMUDA' in tokens:
-        if 'JEANS' in tokens: familia = 'BERMUDA JEANS FEMIN' if gen == 'FEMIN' else 'BERMUDA JEANS MASC'
-        elif 'LINHO' in tokens: familia = 'BERMUDA LINHO MASC'
-        elif 'MOLETOM' in tokens: familia = 'BERMUDA MOLETOM MASC'
-        elif 'NYLON' in tokens: familia = 'BERMUDA NYLON MASC'
-        elif 'SARJA' in tokens: familia = 'BERMUDA SARJA MASC'
-        elif gen == 'FEMIN': familia = 'BERMUDA TECIDO FEMIN'
-    elif 'CALCA' in tokens:
-        if 'JEANS' in tokens: familia = 'CALCA JEANS FEMIN' if gen == 'FEMIN' else 'CALCA JEANS MASC'
-        elif 'JOGGER' in tokens: familia = 'CALCA JOGGER MASC'
-        elif 'MOLETOM' in tokens: familia = 'CALCA MOLETOM FEMIN' if gen == 'FEMIN' else 'CALCA MOLETOM MASC'
-        elif 'SARJA' in tokens: familia = 'CALCA SARJA MASC'
-        elif gen: familia = f'CALCA TECIDO {gen}'
+        if 'JEANS' in tokens:
+            alvo = 'BERMUDA JEANS FEMIN' if genero == 'FEMIN' else 'BERMUDA JEANS MASC'
+        elif 'LINHO' in tokens:
+            alvo = 'BERMUDA LINHO MASC'
+        elif 'MOLETOM' in tokens:
+            alvo = 'BERMUDA MOLETOM MASC'
+        elif 'NYLON' in tokens:
+            alvo = 'BERMUDA NYLON MASC'
+        elif 'SARJA' in tokens:
+            alvo = 'BERMUDA SARJA MASC'
+        elif genero == 'FEMIN':
+            alvo = 'BERMUDA JEANS FEMIN' if seg4 in {'51','75','40'} else 'BERMUDA TECIDO FEMIN'
+        elif genero == 'MASC':
+            alvo = {
+                '19': 'BERMUDA MOLETOM MASC',
+                '20': 'BERMUDA NYLON MASC',
+                '23': 'BERMUDA SARJA MASC',
+                '24': 'BERMUDA LINHO MASC',
+                '40': 'BERMUDA JEANS MASC',
+            }.get(seg4)
+        else:
+            alvo = None
+        if alvo and existe(alvo):
+            return existe(alvo)
+
+    # Outras famílias oficiais de vestuário.
+    if 'SAIA' in tokens:
+        if 'JEANS' in tokens and existe('SAIA JEANS FEMIN'):
+            return existe('SAIA JEANS FEMIN')
+        if existe('SAIA TECIDO FEMIN'):
+            return existe('SAIA TECIDO FEMIN')
+    if 'BIQUINI' in tokens or 'MAIO' in tokens:
+        if existe('BIQUINI / MAIO FEMIN'):
+            return existe('BIQUINI / MAIO FEMIN')
+    if 'KIMONO' in tokens or ('SAIDA' in tokens and 'PRAIA' in tokens):
+        if existe('SAIDA PRAIA / QUIMONO FEMIN'):
+            return existe('SAIDA PRAIA / QUIMONO FEMIN')
+    if 'REGATAO' in tokens:
+        if existe('REGATA FEMIN') and genero == 'FEMIN':
+            return existe('REGATA FEMIN')
+        if existe('REGATA MASC') and genero == 'MASC':
+            return existe('REGATA MASC')
+    if 'CARDIGAN' in tokens or 'CACHEQUER' in tokens:
+        alvo = 'SUETER / TRICOT FEMIN' if genero == 'FEMIN' else 'SUETER / TRICOT MASC' if genero == 'MASC' else None
+        if alvo and existe(alvo):
+            return existe(alvo)
+    if 'CORSELET' in tokens:
+        if existe('TOP CROPPED FEMIN'):
+            return existe('TOP CROPPED FEMIN')
+    if 'LENCO' in tokens:
+        alvo = 'ACESSORIO FEMIN' if genero == 'FEMIN' else 'ACESSORIO MASC' if genero == 'MASC' else None
+        if alvo and existe(alvo):
+            return existe(alvo)
+
+    # Casos que são famílias claras no cadastro.
+    familias = []
+    if 'INFANTIL' in tokens:
+        familias.append('INFANTIL FEMIN' if genero == 'FEMIN' else 'INFANTIL MASC' if genero == 'MASC' else None)
+    if 'SUETER' in tokens or 'TRICOT' in tokens:
+        familias.append('SUETER / TRICOT FEMIN' if genero == 'FEMIN' else 'SUETER / TRICOT MASC' if genero == 'MASC' else None)
+    if 'TRIJUNTO' in tokens:
+        familias.append('CONJUNTO FEMIN' if genero == 'FEMIN' else 'CONJUNTO MASC' if genero == 'MASC' else None)
+    if 'PROMOCAO' in tokens or 'PROMOCIONAL' in tokens:
+        familias.append('PROMOCIONAL FEMIN' if genero == 'FEMIN' else 'PROMOCIONAL MASC' if genero == 'MASC' else None)
+    if 'BATA' in tokens:
+        familias.append('BLUSA FEMIN' if genero == 'FEMIN' else 'BLUSA MASC' if genero == 'MASC' else None)
+    if 'CHINELO' in tokens:
+        familias.append('CHINELO FEMIN' if genero == 'FEMIN' else 'CHINELO MASC' if genero == 'MASC' else None)
+    if 'SAPATENIS' in tokens or 'RASTEIRA' in tokens:
+        familias.append('CALÇADO FEMIN' if genero == 'FEMIN' else 'CALÇADO MASC' if genero == 'MASC' else None)
+    if 'GRAVATA' in tokens:
+        familias.append('GRAVATA MASC')
+    if 'CALCINHA' in tokens or 'SUTIA' in tokens or 'SUTIÃ' in texto:
+        familias.append('ROUPA INTIMA FEMIN')
+
+    for alvo in familias:
+        if alvo and existe(alvo):
+            return existe(alvo)
+
+    # Família principal.
+    familia = None
+    if 'CALCA' in tokens:
+        if 'JEANS' in tokens: familia = 'CALÇA JEANS FEMIN' if genero == 'FEMIN' else 'CALÇA JEANS MASC'
+        elif 'JOGGER' in tokens: familia = 'CALÇA JOGGER MASC'
+        elif 'MOLETOM' in tokens: familia = 'CALÇA MOLETOM FEMIN' if genero == 'FEMIN' else 'CALÇA MOLETOM MASC'
+        elif 'SARJA' in tokens: familia = 'CALÇA SARJA MASC'
+        elif genero: familia = f'CALÇA TECIDO {genero}'
     elif 'BLUSA' in tokens:
-        familia = 'BLUSA INVERNO FEMIN' if ('INVERNO' in tokens and gen == 'FEMIN') else ('BLUSA FEMIN' if gen == 'FEMIN' else 'BLUSA MASC' if gen == 'MASC' else None)
+        familia = 'BLUSA INVERNO FEMIN' if ('INVERNO' in tokens and genero == 'FEMIN') else ('BLUSA FEMIN' if genero == 'FEMIN' else 'BLUSA MASC' if genero == 'MASC' else None)
     elif 'CAMISETA' in tokens:
-        if gen == 'FEMIN': familia = 'CAMISETA FEMIN'
-        elif gen == 'MASC':
-            familia = 'CAMISETA ML MASC' if 'ML' in tokens else 'CAMISETA MC MASC' if 'MC' in tokens else None
+        if genero == 'FEMIN': familia = 'CAMISETA FEMIN'
+        elif genero == 'MASC':
+            if seg4 == '92': familia = 'CAMISETA ML MASC'
+            elif seg4 in {'07','57','39'}: familia = 'CAMISETA MC MASC'
     elif 'CAMISA' in tokens:
-        if 'CHEMISE' in tokens and gen == 'FEMIN': familia = 'CAMISA CHEMISE FEMIN'
-        elif gen == 'MASC': familia = 'CAMISA ML MASC' if 'ML' in tokens else 'CAMISA MC MASC' if 'MC' in tokens else None
-    elif 'REGATA' in tokens: familia = 'REGATA FEMIN' if gen == 'FEMIN' else 'REGATA MASC' if gen == 'MASC' else None
-    elif 'POLO' in tokens: familia = 'POLO FEMIN' if gen == 'FEMIN' else 'POLO MASC' if gen == 'MASC' else None
-    elif 'BLAZER' in tokens: familia = 'BLAZER FEMIN' if gen == 'FEMIN' else 'BLAZER MASC' if gen == 'MASC' else None
+        if 'CHEMISE' in tokens and genero == 'FEMIN': familia = 'CAMISA CHEMISE FEMIN'
+        elif genero == 'MASC': familia = 'CAMISA ML MASC' if seg4 == '06' else 'CAMISA MC MASC' if seg4 == '35' else None
+    elif 'REGATA' in tokens: familia = 'REGATA FEMIN' if genero == 'FEMIN' else 'REGATA MASC' if genero == 'MASC' else None
+    elif 'POLO' in tokens: familia = 'POLO FEMIN' if genero == 'FEMIN' else 'POLO MASC' if genero == 'MASC' else None
+    elif 'BLAZER' in tokens: familia = 'BLAZER FEMIN' if genero == 'FEMIN' else 'BLAZER MASC' if genero == 'MASC' else None
     elif 'BODY' in tokens: familia = 'BODY FEMIN'
     elif 'MACACAO' in tokens: familia = 'MACACAO FEMIN'
     elif 'MACAQUINHO' in tokens: familia = 'MACAQUINHO FEMIN'
     elif 'TOP' in tokens or 'CROPPED' in tokens: familia = 'TOP CROPPED FEMIN'
-    elif 'COLETE' in tokens: familia = 'COLETE FEMIN' if gen == 'FEMIN' else 'COLETE MASC' if gen == 'MASC' else None
-    elif 'CASACO' in tokens: familia = 'CASACO FEMIN' if gen == 'FEMIN' else 'CASACO MASC' if gen == 'MASC' else None
-    elif 'JAQUETA' in tokens: familia = 'JAQUETA FEMIN' if gen == 'FEMIN' else 'JAQUETA MASC' if gen == 'MASC' else None
-    elif 'CHINELO' in tokens: familia = 'CHINELO FEMIN' if gen == 'FEMIN' else 'CHINELO MASC' if gen == 'MASC' else None
-    elif 'MEIA' in tokens: familia = 'MEIA FEMIN' if gen == 'FEMIN' else 'MEIA MASC' if gen == 'MASC' else None
-    elif 'MOLETOM' in tokens: familia = 'MOLETOM FEMIN' if gen == 'FEMIN' else 'MOLETOM MASC' if gen == 'MASC' else None
-    elif 'PIJAMA' in tokens: familia = 'PIJAMA FEMIN' if gen == 'FEMIN' else 'PIJAMA MASC' if gen == 'MASC' else None
+    elif 'COLETE' in tokens: familia = 'COLETE FEMIN' if genero == 'FEMIN' else 'COLETE MASC' if genero == 'MASC' else None
+    elif 'CASACO' in tokens: familia = 'CASACO FEMIN' if genero == 'FEMIN' else 'CASACO MASC' if genero == 'MASC' else None
+    elif 'JAQUETA' in tokens: familia = 'JAQUETA FEMIN' if genero == 'FEMIN' else 'JAQUETA MASC' if genero == 'MASC' else None
+    elif 'CHINELO' in tokens: familia = 'CHINELO FEMIN' if genero == 'FEMIN' else 'CHINELO MASC' if genero == 'MASC' else None
+    elif 'MEIA' in tokens: familia = 'MEIA FEMIN' if genero == 'FEMIN' else 'MEIA MASC' if genero == 'MASC' else None
+    elif 'MOLETOM' in tokens: familia = 'MOLETOM FEMIN' if genero == 'FEMIN' else 'MOLETOM MASC' if genero == 'MASC' else None
+    elif 'PIJAMA' in tokens: familia = 'PIJAMA FEMIN' if genero == 'FEMIN' else 'PIJAMA MASC' if genero == 'MASC' else None
     elif 'CONJUNTO' in tokens:
-        familia = 'CONJUNTO INVERNO FEMIN' if 'INVERNO' in tokens else ('CONJUNTO FEMIN' if gen == 'FEMIN' else 'CONJUNTO MASC' if gen == 'MASC' else None)
-    elif any(t in tokens for t in ('TENIS','SAPATO','SANDALIA','BOTA','CALCADO')):
-        familia = 'CALCADO FEMIN' if gen == 'FEMIN' else 'CALCADO MASC' if gen == 'MASC' else None
+        familia = 'CONJUNTO INVERNO FEMIN' if 'INVERNO' in tokens else ('CONJUNTO FEMIN' if genero == 'FEMIN' else 'CONJUNTO MASC' if genero == 'MASC' else None)
+    elif any(t in tokens for t in ('TENIS','SAPATO','SANDALIA','BOTA','CALCADO','SAPATENIS','RASTEIRA')):
+        familia = 'CALÇADO FEMIN' if genero == 'FEMIN' else 'CALÇADO MASC' if genero == 'MASC' else None
     elif 'BOLSA' in tokens:
-        familia = 'BOLSA FEMIN' if gen == 'FEMIN' else 'MOCHILA / BOLSA MASC' if gen == 'MASC' else None
-    elif 'CINTO' in tokens: familia = 'CINTO FEMIN' if gen == 'FEMIN' else 'CINTO MASC' if gen == 'MASC' else None
-    elif 'OCULOS' in tokens: familia = 'OCULOS FEMIN' if gen == 'FEMIN' else 'OCULOS MASC' if gen == 'MASC' else None
-    elif 'CARTEIRA' in tokens: familia = 'CARTEIRA FEMIN' if gen == 'FEMIN' else 'CARTEIRA MASC' if gen == 'MASC' else None
+        familia = 'BOLSA FEMIN' if genero == 'FEMIN' else 'MOCHILA / BOLSA MASC' if genero == 'MASC' else None
+    elif 'CINTO' in tokens: familia = 'CINTO FEMIN' if genero == 'FEMIN' else 'CINTO MASC' if genero == 'MASC' else None
+    elif 'OCULOS' in tokens: familia = 'OCULOS FEMIN' if genero == 'FEMIN' else 'OCULOS MASC' if genero == 'MASC' else None
+    elif 'CARTEIRA' in tokens: familia = 'CARTEIRA FEMIN' if genero == 'FEMIN' else 'CARTEIRA MASC' if genero == 'MASC' else None
     elif 'CUECA' in tokens: familia = 'CUECA MASC'
-    elif 'LINGERIE' in tokens: familia = 'LINGERIE FEMIN'
-    elif 'SUTIA' in tokens or 'SUTIÃ' in tokens: familia = 'SUTIA FEMIN'
+    elif 'LINGERIE' in tokens: familia = 'ROUPA INTIMA FEMIN'
     elif 'MALETA' in tokens: familia = 'MALETA MASC'
     elif 'GRAVATA' in tokens: familia = 'GRAVATA MASC'
 
-    if familia:
-        g = existe(familia)
-        if g:
-            return g
+    if familia and existe(familia):
+        return existe(familia)
 
-    # Correspondência por tokens dos nomes oficiais.
-    # Exigimos a família principal (primeiro token relevante) e favorecemos gênero.
-    grupos_candidatos = []
-    stop = {'FEMIN','MASC','UNICO','MASCULINO','FEMININO'}
+    # Correspondência exata por tokens do nome oficial.
+    candidatos = []
     for grupo in grupos:
         ng = normalizar_texto_analise(grupo)
-        gt = [t for t in ng.split() if t not in stop]
+        gt = [t for t in ng.split() if t not in {'FEMIN','MASC','UNICO','MASCULINO','FEMININO'}]
         if not gt:
             continue
         overlap = sum(t in tokens for t in gt)
         if overlap == len(gt):
             score = 100 + len(gt) * 10
-            if gen and (('FEMIN' in ng and gen == 'FEMIN') or ('MASC' in ng and gen == 'MASC')):
+            if genero and (('FEMIN' in ng and genero == 'FEMIN') or ('MASC' in ng and genero == 'MASC')):
                 score += 20
-            grupos_candidatos.append((score, len(gt), grupo))
-    if grupos_candidatos:
-        grupos_candidatos.sort(reverse=True)
-        if len(grupos_candidatos) == 1 or grupos_candidatos[0][:2] > grupos_candidatos[1][:2]:
-            return grupos_candidatos[0][2]
+            candidatos.append((score, len(gt), grupo))
+    if candidatos:
+        candidatos.sort(reverse=True)
+        if len(candidatos) == 1 or candidatos[0][:2] > candidatos[1][:2]:
+            return candidatos[0][2]
 
     return None
 
