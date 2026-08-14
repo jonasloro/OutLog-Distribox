@@ -7,6 +7,10 @@ import os
 import binascii
 import hmac
 import base64
+import csv
+import unicodedata
+import zipfile
+import xml.etree.ElementTree as ET
 from io import BytesIO
 from PIL import Image
 from datetime import datetime
@@ -997,6 +1001,304 @@ def carregar_historico_movimentacoes(limite=200):
     return linhas
 
 # ==========================================
+# ANALISE DE ESTOQUE POR RUA / GRUPO / MARCA
+# ==========================================
+def normalizar_texto_analise(valor):
+    texto = unicodedata.normalize("NFKD", str(valor or "")).encode("ascii", "ignore").decode("ascii").upper()
+    texto = re.sub(r"[^A-Z0-9]+", " ", texto)
+    texto = re.sub(r"\s+", " ", texto).strip()
+    substituicoes = {
+        "MANGA LONGA": "ML",
+        "MANGA CURTA": "MC",
+        "FEMININO": "FEMIN",
+        "MASCULINO": "MASC",
+    }
+    for antigo, novo in substituicoes.items():
+        texto = texto.replace(antigo, novo)
+    return " ".join(texto.split())
+
+
+def ler_csv_estoque_upload(arquivo):
+    """Lê CSV do SofStore e retorna {codigo_barra: quantidade}."""
+    if arquivo is None:
+        return None
+    bruto = arquivo.getvalue()
+    texto = bruto.decode("utf-8-sig", errors="replace")
+    linhas = list(csv.reader(texto.splitlines(), delimiter=";"))
+    idx_cabecalho = None
+    for i, linha in enumerate(linhas):
+        if any(normalizar_texto_analise(x) == "CODIGO DE BARRAS" for x in linha):
+            idx_cabecalho = i
+            break
+    if idx_cabecalho is None:
+        raise ValueError("CSV não reconhecido: não encontrei a coluna 'codigo de barras'.")
+    cab = [normalizar_texto_analise(x) for x in linhas[idx_cabecalho]]
+    try:
+        idx_barra = cab.index("CODIGO DE BARRAS")
+        idx_qtd = cab.index("QUANTIDADE")
+    except ValueError:
+        raise ValueError("CSV precisa ter as colunas 'codigo de barras' e 'quantidade'.")
+    resultado = {}
+    for linha in linhas[idx_cabecalho + 1:]:
+        if len(linha) <= max(idx_barra, idx_qtd):
+            continue
+        codigo = re.sub(r"\D", "", str(linha[idx_barra]))
+        if not codigo:
+            continue
+        try:
+            qtd = float(str(linha[idx_qtd]).replace(",", ".").strip())
+        except Exception:
+            continue
+        resultado[codigo] = resultado.get(codigo, 0) + qtd
+    return resultado
+
+
+def ler_detalhamento_xlsx_upload(arquivo):
+    """Lê o XLSX de detalhamento sem depender de engine externo no Streamlit."""
+    if arquivo is None:
+        return {}
+    bruto = arquivo.getvalue()
+    ns = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    with zipfile.ZipFile(BytesIO(bruto)) as z:
+        nomes = z.namelist()
+        folha = "xl/worksheets/sheet1.xml"
+        if folha not in nomes:
+            raise ValueError("XLSX não possui a primeira planilha esperada (sheet1.xml).")
+        raiz = ET.fromstring(z.read(folha))
+        linhas = []
+        for row in raiz.findall(".//a:sheetData/a:row", ns):
+            vals = {}
+            for cell in row.findall("a:c", ns):
+                ref = cell.attrib.get("r", "")
+                col = re.sub(r"\d", "", ref)
+                tipo = cell.attrib.get("t")
+                if tipo == "inlineStr":
+                    is_el = cell.find("a:is", ns)
+                    valor = "" if is_el is None else "".join((t.text or "") for t in is_el.iter("{%s}t" % ns["a"]))
+                else:
+                    v = cell.find("a:v", ns)
+                    valor = v.text if v is not None else ""
+                vals[col] = valor
+            linhas.append(vals)
+    if not linhas:
+        return {}
+    cab = {normalizar_texto_analise(k): v for k, v in linhas[0].items()}
+    # O export do SofStore usa: A=CÓD. BARRAS, B=REFERÊNCIA, D=DESCRIÇÃO.
+    indice_barra = "A" if "A" in linhas[0] else None
+    if indice_barra is None:
+        raise ValueError("Não consegui localizar a coluna CÓD. BARRAS no XLSX.")
+    resultado = {}
+    for row in linhas[1:]:
+        codigo = re.sub(r"\D", "", str(row.get(indice_barra, "")))
+        if not codigo:
+            continue
+        resultado[codigo] = {
+            "descricao": str(row.get("D", "")),
+            "referencia": str(row.get("B", "")),
+        }
+    return resultado
+
+
+def extrair_grupos_marcas_pdf_upload(arquivo):
+    """Extrai a lista oficial de grupos e marcas do relatório do SofStore."""
+    if arquivo is None or not PYPDF_DISPONIVEL:
+        return [], []
+    leitor = pypdf.PdfReader(BytesIO(arquivo.getvalue()))
+    texto = "\n".join(page.extract_text() or "" for page in leitor.pages)
+    grupos = []
+    marcas = []
+    grupo_atual = None
+    linhas = [" ".join(x.split()).strip() for x in texto.splitlines() if x.strip()]
+    for linha in linhas:
+        if linha.startswith("SUBTOTAL"):
+            grupo_atual = None
+            continue
+        m = re.match(r"^(.*?)\s+[\d\.,]+\s+[\d\.,]+\d*$", linha)
+        if grupo_atual and m:
+            marcas.append(m.group(1).strip())
+            continue
+        if linha.upper() == linha and not re.search(r"\d", linha) and len(linha) > 2:
+            grupo_atual = linha
+            grupos.append(linha)
+    grupos_unicos = []
+    vistos = set()
+    for grupo in grupos:
+        chave = normalizar_texto_analise(grupo)
+        if chave in {"", "RESUMO DE ESTOQUE DO GRUPO", "DESCRICAO", "CUSTO", "VENDAESTOQUE", "CD", "TOTAL P"}:
+            continue
+        if chave not in vistos:
+            vistos.add(chave)
+            grupos_unicos.append(grupo)
+    marcas_unicas = []
+    vistos = set()
+    for marca in marcas:
+        base = normalizar_texto_analise(marca)
+        base = re.sub(r"\s+(PROMO|L|N|NAC)$", "", base).strip()
+        if base and base not in vistos:
+            vistos.add(base)
+            marcas_unicas.append(base)
+    return grupos_unicos, marcas_unicas
+
+
+def classificar_grupo_analise(descricao, referencia, grupos):
+    texto = normalizar_texto_analise(f"{descricao} {referencia}")
+    tokens = set(texto.split())
+    grupos_norm = {normalizar_texto_analise(g): g for g in grupos}
+
+    def existe(nome):
+        return grupos_norm.get(normalizar_texto_analise(nome))
+
+    # Regras determinísticas para categorias em que o código de produto costuma
+    # trazer apenas o tipo + marca, enquanto o SofStore separa o grupo por tecido,
+    # comprimento ou gênero.
+    genero = "FEMIN" if "FEMIN" in tokens else ("MASC" if "MASC" in tokens else None)
+    if texto.startswith("BLUSA "):
+        if "INVERNO" in tokens and genero == "FEMIN" and existe("BLUSA INVERNO FEMIN"): return existe("BLUSA INVERNO FEMIN")
+        if genero == "FEMIN" and existe("BLUSA FEMIN"): return existe("BLUSA FEMIN")
+        if genero == "MASC" and existe("BLUSA MASC"): return existe("BLUSA MASC")
+    if texto.startswith("BERMUDA "):
+        for palavra, grupo in [
+            ("JEANS", "BERMUDA JEANS FEMIN" if genero == "FEMIN" else "BERMUDA JEANS MASC"),
+            ("LINHO", "BERMUDA LINHO MASC"),
+            ("MOLETOM", "BERMUDA MOLETOM MASC"),
+            ("NYLON", "BERMUDA NYLON MASC"),
+            ("SARJA", "BERMUDA SARJA MASC"),
+        ]:
+            if palavra in tokens and existe(grupo): return existe(grupo)
+        if genero == "FEMIN" and existe("BERMUDA TECIDO FEMIN"): return existe("BERMUDA TECIDO FEMIN")
+    if texto.startswith("CALCA "):
+        for palavra, grupo in [
+            ("JEANS", "CALCA JEANS FEMIN" if genero == "FEMIN" else "CALCA JEANS MASC"),
+            ("JOGGER", "CALCA JOGGER MASC"),
+            ("MOLETOM", "CALCA MOLETOM FEMIN" if genero == "FEMIN" else "CALCA MOLETOM MASC"),
+            ("SARJA", "CALCA SARJA MASC"),
+        ]:
+            if palavra in tokens and existe(grupo): return existe(grupo)
+        tecido = "CALCA TECIDO FEMIN" if genero == "FEMIN" else "CALCA TECIDO MASC"
+        if existe(tecido): return existe(tecido)
+    if texto.startswith("CAMISA ") or texto.startswith("CAMISETA "):
+        base = "CAMISA" if texto.startswith("CAMISA ") else "CAMISETA"
+        if "CHEMISE" in tokens and existe("CAMISA CHEMISE FEMIN"): return existe("CAMISA CHEMISE FEMIN")
+        if genero == "MASC":
+            if "ML" in tokens and existe(f"{base} ML MASC"): return existe(f"{base} ML MASC")
+            if "MC" in tokens and existe(f"{base} MC MASC"): return existe(f"{base} MC MASC")
+        if base == "CAMISETA" and genero == "FEMIN" and existe("CAMISETA FEMIN"): return existe("CAMISETA FEMIN")
+    if texto.startswith("VESTIDO ") and genero == "FEMIN":
+        for palavra, grupo in [("CURTO", "VESTIDO CURTO FEMIN"), ("LONGO", "VESTIDO LONGO FEMIN"), ("MIDI", "VESTIDO MIDI FEMIN")]:
+            if palavra in tokens and existe(grupo): return existe(grupo)
+        if existe("VESTIDO UNICO FEMIN"): return existe("VESTIDO UNICO FEMIN")
+    if texto.startswith("SAIA ") and genero == "FEMIN":
+        if "JEANS" in tokens and existe("SAIA JEANS FEMIN"): return existe("SAIA JEANS FEMIN")
+        if existe("SAIA TECIDO FEMIN"): return existe("SAIA TECIDO FEMIN")
+    if texto.startswith("REGATA "):
+        grupo = "REGATA FEMIN" if genero == "FEMIN" else "REGATA MASC"
+        if existe(grupo): return existe(grupo)
+    if texto.startswith("POLO "):
+        grupo = "POLO FEMIN" if genero == "FEMIN" else "POLO MASC"
+        if existe(grupo): return existe(grupo)
+    if texto.startswith("BLAZER "):
+        grupo = "BLAZER FEMIN" if genero == "FEMIN" else "BLAZER MASC"
+        if existe(grupo): return existe(grupo)
+    if texto.startswith("BODY ") and existe("BODY FEMIN"):
+        return existe("BODY FEMIN")
+    if texto.startswith("MACACAO ") and existe("MACACAO FEMIN"):
+        return existe("MACACAO FEMIN")
+    if texto.startswith("MACAQUINHO ") and existe("MACAQUINHO FEMIN"):
+        return existe("MACAQUINHO FEMIN")
+    if texto.startswith("TOP ") and existe("TOP CROPPED FEMIN"):
+        return existe("TOP CROPPED FEMIN")
+    if texto.startswith("CROPPED ") and existe("TOP CROPPED FEMIN"):
+        return existe("TOP CROPPED FEMIN")
+    if texto.startswith("BIQUINI") and existe("BIQUINI / MAIO FEMIN"):
+        return existe("BIQUINI / MAIO FEMIN")
+    if texto.startswith("MAIO ") and existe("BIQUINI / MAIO FEMIN"):
+        return existe("BIQUINI / MAIO FEMIN")
+    if texto.startswith("COLETE "):
+        grupo = "COLETE FEMIN" if genero == "FEMIN" else "COLETE MASC"
+        if existe(grupo): return existe(grupo)
+    if texto.startswith("CASACO "):
+        grupo = "CASACO FEMIN" if genero == "FEMIN" else "CASACO MASC"
+        if existe(grupo): return existe(grupo)
+    if texto.startswith("JAQUETA "):
+        grupo = "JAQUETA FEMIN" if genero == "FEMIN" else "JAQUETA MASC"
+        if existe(grupo): return existe(grupo)
+    if texto.startswith("BOLSA ") and existe("BOLSA FEMIN"):
+        return existe("BOLSA FEMIN")
+    if texto.startswith("CHINELO "):
+        grupo = "CHINELO FEMIN" if genero == "FEMIN" else "CHINELO MASC"
+        if existe(grupo): return existe(grupo)
+    if texto.startswith("MEIA "):
+        grupo = "MEIA FEMIN" if genero == "FEMIN" else "MEIA MASC"
+        if existe(grupo): return existe(grupo)
+    if texto.startswith("CONJUNTO "):
+        if "INVERNO" in tokens and existe("CONJUNTO INVERNO FEMIN"): return existe("CONJUNTO INVERNO FEMIN")
+        grupo = "CONJUNTO FEMIN" if genero == "FEMIN" else "CONJUNTO MASC"
+        if existe(grupo): return existe(grupo)
+
+    # Busca genérica por todos os tokens do grupo oficial.
+    melhor = None
+    melhor_pontuacao = (-1, -1)
+    for grupo in grupos:
+        ng = normalizar_texto_analise(grupo)
+        gt = ng.split()
+        if not gt:
+            continue
+        contidos = sum(1 for t in gt if t in tokens)
+        if contidos == len(gt):
+            pontuacao = (len(gt), len(ng))
+            if pontuacao > melhor_pontuacao:
+                melhor = grupo
+                melhor_pontuacao = pontuacao
+    return melhor
+
+
+def classificar_marca_analise(descricao, referencia, marcas):
+    texto = normalizar_texto_analise(f"{descricao} {referencia}")
+    melhor = None
+    melhor_len = -1
+    for marca in marcas:
+        nm = normalizar_texto_analise(marca)
+        if nm and nm in texto and len(nm) > melhor_len:
+            melhor = marca
+            melhor_len = len(nm)
+    return melhor
+
+
+def construir_analise_rua1(estoque_total, estoque_rua1, detalhamento, grupos, marcas):
+    linhas = []
+    qtd_total = sum(estoque_total.values())
+    qtd_r1 = sum(estoque_rua1.values())
+    qtd_r1_fora_total = 0.0
+    grupos_norm = grupos or []
+    marcas_norm = marcas or []
+    for codigo, quantidade_total in estoque_total.items():
+        info = detalhamento.get(codigo)
+        qtd_r1_codigo = min(float(estoque_rua1.get(codigo, 0)), float(quantidade_total))
+        if qtd_r1_codigo <= 0 and info is None:
+            continue
+        if info is None:
+            grupo = "⚠️ Sem detalhamento"
+            marca = "⚠️ Sem marca"
+        else:
+            grupo = classificar_grupo_analise(info.get("descricao", ""), info.get("referencia", ""), grupos_norm) or "⚠️ Grupo não mapeado"
+            marca = classificar_marca_analise(info.get("descricao", ""), info.get("referencia", ""), marcas_norm) or "⚠️ Marca não mapeada"
+        linhas.append({
+            "Código de Barras": codigo,
+            "Grupo": grupo,
+            "Marca": marca,
+            "Total": float(quantidade_total),
+            "Rua 1": qtd_r1_codigo,
+            "Outras Ruas": max(float(quantidade_total) - qtd_r1_codigo, 0),
+        })
+    df = pd.DataFrame(linhas)
+    if df.empty:
+        return df
+    resumo = df.groupby(["Grupo", "Marca"], as_index=False)[["Total", "Rua 1", "Outras Ruas"]].sum()
+    resumo["% Rua 1"] = np.where(resumo["Total"] > 0, resumo["Rua 1"] / resumo["Total"] * 100, 0)
+    resumo = resumo.sort_values(["Grupo", "Marca"]).reset_index(drop=True)
+    return resumo
+
+# ==========================================
 # RELATÓRIO DE ESTOQUE IMPORTADO (HISTÓRICO DE IMPORTAÇÕES)
 # ==========================================
 def salvar_relatorio_no_banco(grupos, nome_arquivo, importado_por):
@@ -1510,7 +1812,8 @@ opcoes_telas = [
     "📊 Estatísticas de Casulos",
     "🧪 Simulador de Capacidade",
     "📄 Importar Relatório de Estoque",
-    "📥 Entrada de Dados / Abastecimento"
+    "📥 Entrada de Dados / Abastecimento",
+    "📊 Análise Rua 1 por Grupo"
 ]
 if st.session_state.papel_atual == "gerente":
     opcoes_telas.append("🛠️ Gerenciador (Admin)")
@@ -2216,6 +2519,106 @@ elif st.session_state.aba_ativa_selecionada == "🚚 Expedição (Teste)":
         df_log_exp = pd.DataFrame(st.session_state.log_expedicao_teste)
         st.dataframe(df_log_exp, use_container_width=True, hide_index=True)
 
+
+# ==========================================
+# TELA 3.4.5: ANÁLISE DE ESTOQUE POR GRUPO / MARCA / RUA 1
+# ==========================================
+elif st.session_state.aba_ativa_selecionada == "📊 Análise Rua 1 por Grupo":
+    st.markdown("<h3 style='text-align: center; color: #ffcc00;'>📊 Análise de Estoque — Rua 1 x Demais Ruas</h3>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align:center; color:#8892b0;'>Cruza os códigos do SofStore com o detalhamento de produtos para separar o estoque total entre Rua 1 e demais ruas, com filtros por grupo e marca.</p>", unsafe_allow_html=True)
+
+    col_a1, col_a2, col_a3, col_a4 = st.columns(4)
+    with col_a1:
+        arquivo_todas = st.file_uploader("📦 CSV — Todas as Ruas", type=["csv"], key="analise_todas_ruas")
+    with col_a2:
+        arquivo_r1 = st.file_uploader("1️⃣ CSV — Rua 1", type=["csv"], key="analise_rua1")
+    with col_a3:
+        arquivo_detalhe = st.file_uploader("🔎 XLSX — Detalhamento", type=["xlsx"], key="analise_detalhe")
+    with col_a4:
+        arquivo_grupos = st.file_uploader("📋 PDF — Grupo x Marca", type=["pdf"], key="analise_pdf_grupos")
+
+    if arquivo_todas and arquivo_r1 and arquivo_detalhe:
+        try:
+            estoque_total = ler_csv_estoque_upload(arquivo_todas)
+            estoque_r1 = ler_csv_estoque_upload(arquivo_r1)
+            detalhamento = ler_detalhamento_xlsx_upload(arquivo_detalhe)
+            grupos_oficiais, marcas_oficiais = extrair_grupos_marcas_pdf_upload(arquivo_grupos) if arquivo_grupos else ([], [])
+
+            # Fallback: grupos mais comuns continuam disponíveis sem o PDF.
+            if not grupos_oficiais:
+                grupos_oficiais = sorted({
+                    " ".join(x.split()) for x in [
+                        "ACESSORIO FEMIN", "ACESSORIO MASC", "BERMUDA JEANS FEMIN", "BERMUDA JEANS MASC",
+                        "BERMUDA LINHO MASC", "BERMUDA MOLETOM MASC", "BERMUDA NYLON MASC", "BERMUDA SARJA MASC",
+                        "BERMUDA TECIDO FEMIN", "BIQUINI / MAIO FEMIN", "BLAZER FEMIN", "BLAZER MASC", "BLUSA FEMIN",
+                        "BLUSA INVERNO FEMIN", "BLUSA MASC", "BODY FEMIN", "BOLSA FEMIN", "BOTA FEMIN", "BOTA MASC",
+                        "CALCA JEANS FEMIN", "CALCA JEANS MASC", "CALCA JOGGER MASC", "CALCA MOLETOM FEMIN", "CALCA MOLETOM MASC",
+                        "CALCA SARJA MASC", "CALCA TECIDO FEMIN", "CALCA TECIDO MASC", "CAMISA CHEMISE FEMIN",
+                        "CAMISA MC MASC", "CAMISA ML MASC", "CAMISETA FEMIN", "CAMISETA MC MASC", "CAMISETA ML MASC",
+                        "CASACO FEMIN", "CASACO MASC", "CHINELO FEMIN", "CHINELO MASC", "CINTO FEMIN", "CINTO MASC",
+                        "COLETE FEMIN", "COLETE MASC", "CONJUNTO FEMIN", "CONJUNTO INVERNO FEMIN", "CONJUNTO MASC",
+                        "CORTA VENTO MASC", "CUECA MASC", "INFANTIL FEMIN", "INFANTIL MASC", "JAQUETA FEMIN", "JAQUETA MASC",
+                        "MACACAO FEMIN", "MACAQUINHO FEMIN", "MEIA FEMIN", "MEIA MASC", "MOLETOM FEMIN", "MOLETOM MASC",
+                        "OCULOS FEMIN", "OCULOS MASC", "POLO MASC", "SAIA JEANS FEMIN", "SAIA TECIDO FEMIN"
+                    ]
+                })
+            if not marcas_oficiais:
+                marcas_oficiais = []
+
+            df_analise = construir_analise_rua1(estoque_total, estoque_r1, detalhamento, grupos_oficiais, marcas_oficiais)
+            total_geral = float(sum(estoque_total.values()))
+            total_r1 = float(min(sum(estoque_r1.values()), total_geral))
+            total_outros = max(total_geral - total_r1, 0)
+
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Estoque total", f"{total_geral:,.0f}")
+            k2.metric("Rua 1", f"{total_r1:,.0f}")
+            k3.metric("Demais ruas", f"{total_outros:,.0f}")
+            k4.metric("% do estoque na Rua 1", f"{(total_r1/total_geral*100 if total_geral else 0):.1f}%")
+
+            if df_analise.empty:
+                st.warning("Nenhum item pôde ser cruzado entre os arquivos enviados.")
+            else:
+                grupos = sorted(df_analise["Grupo"].dropna().unique().tolist())
+                marcas = sorted(df_analise["Marca"].dropna().unique().tolist())
+                f1, f2 = st.columns(2)
+                with f1:
+                    grupo_filtro = st.selectbox("Filtrar por grupo", ["Todos"] + grupos, key="filtro_analise_grupo")
+                with f2:
+                    marca_filtro = st.selectbox("Filtrar por marca", ["Todas"] + marcas, key="filtro_analise_marca")
+
+                df_view = df_analise.copy()
+                if grupo_filtro != "Todos":
+                    df_view = df_view[df_view["Grupo"] == grupo_filtro]
+                if marca_filtro != "Todas":
+                    df_view = df_view[df_view["Marca"] == marca_filtro]
+
+                st.markdown("#### 📋 Estoque por Grupo e Marca")
+                st.dataframe(
+                    df_view.style.format({"Total": "{:,.0f}", "Rua 1": "{:,.0f}", "Outras Ruas": "{:,.0f}", "% Rua 1": "{:.1f}%"}),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                if not df_view.empty:
+                    resumo_grupo = df_view.groupby("Grupo", as_index=False)[["Total", "Rua 1", "Outras Ruas"]].sum().sort_values("Total", ascending=False)
+                    st.markdown("#### 📊 Comparativo por Grupo")
+                    st.bar_chart(resumo_grupo.set_index("Grupo")[["Rua 1", "Outras Ruas"]])
+
+                    r_top = df_view.sort_values("Total", ascending=False).head(20).copy()
+                    st.markdown("#### 🔝 Maiores grupos / marcas")
+                    st.dataframe(
+                        r_top.style.format({"Total": "{:,.0f}", "Rua 1": "{:,.0f}", "Outras Ruas": "{:,.0f}", "% Rua 1": "{:.1f}%"}),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                st.caption("Os códigos presentes no CSV de estoque que não possuem correspondência no XLSX aparecem como 'Sem detalhamento'. Grupos e marcas são classificados a partir do detalhamento e, quando fornecido, da lista oficial do PDF do SofStore.")
+
+        except Exception as e:
+            st.error(f"❌ Não foi possível processar os arquivos: {e}")
+    else:
+        st.info("Envie pelo menos os três arquivos: Todas as Ruas (CSV), Rua 1 (CSV) e Detalhamento (XLSX). O PDF de Grupo x Marca é recomendado para melhorar os filtros oficiais de grupo e marca.")
 
 # ==========================================
 # TELA 3.5: ESTATÍSTICAS DE CASULOS (RAIO-X DA ESTRUTURA)
