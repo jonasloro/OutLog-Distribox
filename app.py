@@ -2357,6 +2357,126 @@ def carregar_relatorio_sgo(uploaded_file):
     if uploaded_file is None: return None
     return _normalizar_sgo(pd.read_excel(uploaded_file, sheet_name=0))
 
+
+def salvar_relatorio_sgo_supabase(df_sgo, nome_arquivo):
+    """Salva uma importação completa do SGO no Supabase."""
+    conn = obter_conexao_bd()
+    if conn is None:
+        return False, st.session_state.get("ultimo_erro_bd", "Banco não disponível.")
+
+    try:
+        agora = pd.Timestamp.now(tz="UTC")
+        usuario = st.session_state.get("usuario_atual", "")
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO public.sgo_relatorios
+                   (nome_arquivo, importado_em, importado_por, quantidade_registros, ativo)
+                   VALUES (%s, %s, %s, %s, TRUE)
+                   RETURNING id""",
+                (nome_arquivo, agora.to_pydatetime(), str(usuario), int(len(df_sgo)))
+            )
+            relatorio_id = cur.fetchone()[0]
+
+            linhas = []
+            for _, r in df_sgo.iterrows():
+                data_prevista = r.get("Data")
+                data_chegada = r.get("DataChegada")
+                if pd.isna(data_prevista):
+                    data_prevista = None
+                else:
+                    data_prevista = pd.Timestamp(data_prevista).date()
+                if pd.isna(data_chegada):
+                    data_chegada = None
+                else:
+                    data_chegada = pd.Timestamp(data_chegada).date()
+
+                linhas.append((
+                    relatorio_id,
+                    str(r.get("Lote", "")),
+                    str(r.get("Grupo", "")),
+                    str(r.get("SKU", "")),
+                    str(r.get("Descrição", "")),
+                    str(r.get("Fornecedor", "")),
+                    int(r.get("Quantidade", 0) or 0),
+                    str(r.get("StatusOriginal", "")),
+                    str(r.get("Fase", "")),
+                    data_prevista,
+                    data_chegada,
+                    str(r.get("Origem", "")),
+                ))
+
+            if linhas:
+                cur.executemany(
+                    """INSERT INTO public.sgo_lotes
+                    (relatorio_id, lote, grupo, sku, descricao, fornecedor, quantidade,
+                     status_original, fase, data_prevista, data_chegada, origem)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    linhas,
+                )
+
+        conn.commit()
+        conn.close()
+        return True, None
+    except Exception as e:
+        try:
+            conn.rollback()
+            conn.close()
+        except Exception:
+            pass
+        return False, str(e)
+
+
+def carregar_ultimo_relatorio_sgo_supabase():
+    """Carrega o último relatório SGO persistido no Supabase."""
+    conn = obter_conexao_bd()
+    if conn is None:
+        return None, None
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, nome_arquivo
+                   FROM public.sgo_relatorios
+                   ORDER BY importado_em DESC, id DESC
+                   LIMIT 1"""
+            )
+            meta = cur.fetchone()
+            if not meta:
+                conn.close()
+                return None, None
+
+            relatorio_id, nome_arquivo = meta
+            cur.execute(
+                """SELECT lote, grupo, sku, descricao, fornecedor, quantidade,
+                          status_original, fase, data_prevista, data_chegada, origem
+                   FROM public.sgo_lotes
+                   WHERE relatorio_id = %s
+                   ORDER BY data_prevista DESC NULLS LAST, id DESC""",
+                (relatorio_id,)
+            )
+            rows = cur.fetchall()
+
+        conn.close()
+
+        cols = [
+            "Lote", "Grupo", "SKU", "Descrição", "Fornecedor", "Quantidade",
+            "StatusOriginal", "Fase", "Data", "DataChegada", "Origem"
+        ]
+        df = pd.DataFrame(rows, columns=cols)
+        df["Quantidade"] = pd.to_numeric(df["Quantidade"], errors="coerce").fillna(0).astype(int)
+        df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
+        df["DataChegada"] = pd.to_datetime(df["DataChegada"], errors="coerce")
+        for c in ["Lote", "Grupo", "SKU", "Descrição", "Fornecedor", "StatusOriginal", "Fase", "Origem"]:
+            df[c] = df[c].fillna("").astype(str)
+        return df, nome_arquivo
+    except Exception as e:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        st.session_state.ultimo_erro_bd = str(e)
+        return None, None
+
 def _sgo_card(titulo, valor, subtitulo="", cor="#ffcc00"):
     st.markdown(f"""<div style="background:#11161d;border:1px solid #283845;border-radius:12px;padding:14px 16px;min-height:100px;">
     <div style="color:#8892b0;font-size:11px;text-transform:uppercase;letter-spacing:1px;">{titulo}</div>
@@ -3706,15 +3826,32 @@ elif st.session_state.aba_ativa_selecionada == "🚚 SGO — Próximas Entradas"
     arquivo_sgo = st.file_uploader("📄 Relatório do SGO (.xlsx)", type=["xlsx"], key="upload_sgo_lotes")
     if arquivo_sgo is not None:
         try:
-            df_sgo = carregar_relatorio_sgo(arquivo_sgo)
-            st.session_state.sgo_relatorio_df = df_sgo
-            st.session_state.sgo_relatorio_nome = arquivo_sgo.name
+            df_sgo_novo = carregar_relatorio_sgo(arquivo_sgo)
+            salvou, erro_bd = salvar_relatorio_sgo_supabase(df_sgo_novo, arquivo_sgo.name)
+
+            if salvou:
+                st.session_state.sgo_relatorio_df = df_sgo_novo
+                st.session_state.sgo_relatorio_nome = arquivo_sgo.name
+                st.success("✅ Relatório do SGO salvo no Supabase. Ele continuará disponível mesmo após reiniciar o app.")
+            else:
+                # Mantém a importação funcional nesta sessão, sem perder o relatório
+                # apenas porque o banco não está acessível.
+                st.session_state.sgo_relatorio_df = df_sgo_novo
+                st.session_state.sgo_relatorio_nome = arquivo_sgo.name
+                st.warning(f"⚠️ Relatório carregado nesta sessão, mas não foi salvo no Supabase: {erro_bd}")
         except Exception as e:
             st.error(f"⚠️ Não consegui processar o relatório: {e}")
             st.stop()
+
     df_sgo = st.session_state.get("sgo_relatorio_df")
     if df_sgo is None:
-        st.info("📄 Envie o relatório do SGO para começar.")
+        df_sgo, nome_sgo = carregar_ultimo_relatorio_sgo_supabase()
+        if df_sgo is not None:
+            st.session_state.sgo_relatorio_df = df_sgo
+            st.session_state.sgo_relatorio_nome = nome_sgo
+
+    if df_sgo is None:
+        st.info("📄 Envie o relatório do SGO para começar.\n\nSe já existir uma importação salva, o OutLog carregará automaticamente o último relatório do Supabase.")
         st.stop()
 
     # Rejeitados não entram no fluxo operacional: serão devolvidos ao fornecedor.
