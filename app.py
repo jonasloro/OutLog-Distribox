@@ -2279,11 +2279,18 @@ if not st.session_state.autenticado:
 # ==========================================
 # SGO — VISÃO SIMPLIFICADA DE ENTRADAS
 # ==========================================
-STATUS_SGO_ORDEM = ["🧵 Aviamento","🚚 Em Trânsito","🏭 Processamento","📦 Em Estocagem","⚠️ Qualidade","✅ Concluído"]
+STATUS_SGO_ORDEM = ["🧵 Aviamento","🚚 Em Trânsito","🏭 Processamento","📦 Em Estocagem","🔎 Qualidade","✅ Concluído"]
 
 def _sgo_fase(status):
     sl = str(status or "").strip().lower()
-    if "rejeitado" in sl or "retrabalho" in sl: return "⚠️ Qualidade"
+    # Rejeitados saem do fluxo operacional: serão devolvidos ao fornecedor.
+    if "rejeitado" in sl:
+        return "⛔ Rejeitado"
+    # Retrabalho continua dentro da fila da Qualidade.
+    if "retrabalho" in sl:
+        return "🔎 Qualidade"
+    if "inspe" in sl or "qualidade" in sl:
+        return "🔎 Qualidade"
     if "aviamento" in sl: return "🧵 Aviamento"
     if "trânsito" in sl or "transito" in sl: return "🚚 Em Trânsito"
     if "estocagem" in sl: return "📦 Em Estocagem"
@@ -2318,12 +2325,24 @@ def _normalizar_sgo(df):
         out["Fornecedor"] = df["Fornecedor"].astype(str)
         qtd_src = df["Qtd Esperada"] if "Qtd Esperada" in cols else df["Qtd Itens"]
         out["Quantidade"] = pd.to_numeric(qtd_src, errors="coerce").fillna(0).astype(int)
-        status = df["Status Compra"].astype(str)
-        if "Status Kanban" in cols:
-            kan = df["Status Kanban"].astype(str)
-            status = kan.where(kan.str.strip().ne(""), status)
-        out["StatusOriginal"] = status
-        out["Fase"] = status.map(_sgo_fase)
+        # Para o relatório de Compras, a situação da Qualidade vem dos campos
+        # próprios do SGO; não inferimos "Qualidade" de um status genérico.
+        status_compra = df["Status Compra"].fillna("").astype(str)
+        status_kanban = df["Status Kanban"].fillna("").astype(str) if "Status Kanban" in cols else pd.Series("", index=df.index)
+        status_lote = df["Status Lote"].fillna("").astype(str) if "Status Lote" in cols else pd.Series("", index=df.index)
+        status_qual = df["Status Qualidade"].fillna("").astype(str) if "Status Qualidade" in cols else pd.Series("", index=df.index)
+        fase_insp = df["Fase Inspeção"].fillna("").astype(str) if "Fase Inspeção" in cols else pd.Series("", index=df.index)
+        conclusao_q = df["Conclusão Qualidade"].fillna("").astype(str) if "Conclusão Qualidade" in cols else pd.Series("", index=df.index)
+        raw = status_kanban.where(status_kanban.str.strip().ne(""), status_compra)
+        out["StatusOriginal"] = raw
+        fase = raw.map(_sgo_fase)
+        rejeitado = status_qual.str.contains("rejeit", case=False, na=False) | status_lote.str.contains("rejeit", case=False, na=False)
+        em_qualidade = (fase_insp.str.strip().ne("") | conclusao_q.str.strip().ne("")) & ~status_qual.str.contains("aprov", case=False, na=False)
+        retrabalho = status_qual.str.contains("retrabalho", case=False, na=False)
+        aprovado = status_qual.str.contains("aprov", case=False, na=False) & conclusao_q.str.strip().ne("")
+        fase = fase.mask(rejeitado, "⛔ Rejeitado")
+        fase = fase.mask((em_qualidade | retrabalho) & ~rejeitado & ~aprovado, "🔎 Qualidade")
+        out["Fase"] = fase
         out["Data"] = pd.to_datetime(df["Data Entrega Prevista"], errors="coerce")
         if "Data Esperada" in cols:
             d2 = pd.to_datetime(df["Data Esperada"], errors="coerce", dayfirst=True)
@@ -3698,7 +3717,9 @@ elif st.session_state.aba_ativa_selecionada == "🚚 SGO — Próximas Entradas"
         st.info("📄 Envie o relatório do SGO para começar.")
         st.stop()
 
-    aberto=df_sgo[df_sgo["Fase"]!="✅ Concluído"].copy()
+    # Rejeitados não entram no fluxo operacional: serão devolvidos ao fornecedor.
+    # Concluídos também saem da fila.
+    aberto=df_sgo[~df_sgo["Fase"].isin(["✅ Concluído","⛔ Rejeitado"])].copy()
     if aberto.empty: aberto=df_sgo.copy()
     aberto["Horizonte"]=aberto["Data"].map(_sgo_horizonte)
     total=int(aberto["Quantidade"].sum())
@@ -3706,14 +3727,15 @@ elif st.session_state.aba_ativa_selecionada == "🚚 SGO — Próximas Entradas"
     atrasado=int(aberto.loc[aberto["Horizonte"]=="Atrasado","Quantidade"].sum())
     transito=int(aberto.loc[aberto["Fase"]=="🚚 Em Trânsito","Quantidade"].sum())
 
+    qualidade=int(df_sgo.loc[df_sgo["Fase"]=="🔎 Qualidade","Quantidade"].sum())
     c1,c2,c3,c4=st.columns(4)
-    with c1: _sgo_card("Total a chegar",total,f"{len(aberto):,} registros","#ffcc00")
+    with c1: _sgo_card("Total em aberto",total,f"{len(aberto):,} registros","#ffcc00")
     with c2: _sgo_card("Próximos 7 dias",ate7,"prioridade","#45a29e")
     with c3: _sgo_card("Atrasados",atrasado,"precisam de atenção","#e74c3c")
-    with c4: _sgo_card("Em trânsito",transito,"já saiu / está vindo","#4aa3ff")
+    with c4: _sgo_card("🔎 Qualidade",qualidade,"inspeção / retrabalho","#c77dff")
 
     st.markdown("### 🧭 Onde está agora?")
-    ordem=["🧵 Aviamento","🚚 Em Trânsito","🏭 Processamento","📦 Em Estocagem","⚠️ Qualidade","✅ Concluído"]
+    ordem=["🧵 Aviamento","🚚 Em Trânsito","🏭 Processamento","📦 Em Estocagem","🔎 Qualidade","✅ Concluído"]
     cols=st.columns(len(ordem))
     for i,fase in enumerate(ordem):
         sub=df_sgo[df_sgo["Fase"]==fase]
@@ -3723,6 +3745,10 @@ elif st.session_state.aba_ativa_selecionada == "🚚 SGO — Próximas Entradas"
             <div style='font-size:11px;color:#b7c0c8;font-weight:700'>{fase}</div>
             <div style='font-size:22px;font-weight:900;color:#ffcc00;margin-top:5px'>{qtd:,}</div>
             <div style='font-size:10px;color:#6f7b86'>{len(sub):,} registros</div></div>""",unsafe_allow_html=True)
+
+    rejeitados=int(df_sgo.loc[df_sgo["Fase"]=="⛔ Rejeitado","Quantidade"].sum())
+    if rejeitados:
+        st.caption(f"⛔ {rejeitados:,} peças rejeitadas foram retiradas do fluxo operacional e não entram no total em aberto.")
 
     st.markdown("### 🔥 Próximos que merecem atenção")
     prioridade=aberto.sort_values(["Horizonte","Data"],na_position="last").head(8)
