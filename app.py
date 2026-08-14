@@ -53,7 +53,7 @@ st.set_page_config(
 # BLOCO 1: CAMADA DE DADOS E ESTADO DO SISTEMA
 # ==========================================
 
-ESTRUTURA_CD = {
+ESTRUTURA_CD_PADRAO = {
     "Rua 01": {"tipo": "Morta", "cols_impar": [], "cols_par": []},
     "Rua 02": {"tipo": "Misto_Transicao", "cols_impar": list(range(21, 94, 2)), "cols_par": list(range(22, 103, 2)) + list(range(103, 141))},
     "Rua 03": {"tipo": "P", "cols_impar": list(range(1, 101, 2)), "cols_par": list(range(2, 102, 2))},
@@ -936,7 +936,7 @@ if ESTRUTURA_CD_DO_BANCO:
     ESTRUTURA_CD = ESTRUTURA_CD_DO_BANCO
 else:
     # Fallback de emergência somente se o Supabase estiver indisponível.
-    ESTRUTURA_CD = ESTRUTURA_CD_PADRAO.copy()
+    ESTRUTURA_CD = {k: dict(v) for k, v in ESTRUTURA_CD_PADRAO.items()}
     st.warning(
         "⚠️ Estrutura do CD não pôde ser carregada do Supabase. "
         "O visualizador está usando o cadastro local apenas como fallback."
