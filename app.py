@@ -1003,6 +1003,12 @@ def carregar_historico_movimentacoes(limite=200):
 # ==========================================
 # ANALISE DE ESTOQUE POR RUA / GRUPO / MARCA
 # ==========================================
+# Mapa opcional de marca -> grupos oficiais.
+# A versão V11 usa este mapa apenas como reforço de classificação; quando o
+# relatório não fornece o vínculo, ele permanece vazio e o classificador
+# segue pelas regras determinísticas já existentes.
+MAPA_MARCA_GRUPOS_ULTIMO = {}
+
 def normalizar_texto_analise(valor):
     texto = unicodedata.normalize("NFKD", str(valor or "")).encode("ascii", "ignore").decode("ascii").upper()
     texto = re.sub(r"[^A-Z0-9]+", " ", texto)
