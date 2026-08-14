@@ -1088,14 +1088,27 @@ def ler_detalhamento_xlsx_upload(arquivo):
     if indice_barra is None:
         raise ValueError("Não consegui localizar a coluna CÓD. BARRAS no XLSX.")
     resultado = {}
+    produto_map = {}
     for row in linhas[1:]:
         codigo = re.sub(r"\D", "", str(row.get(indice_barra, "")))
         if not codigo:
             continue
-        resultado[codigo] = {
-            "descricao": str(row.get("D", "")),
-            "referencia": str(row.get("B", "")),
+        descricao = str(row.get("D", ""))
+        referencia = str(row.get("B", ""))
+        codigo_produto = re.sub(r"\D", "", str(row.get("C", "")))
+        info = {
+            "descricao": descricao,
+            "referencia": referencia,
+            "codigo_produto": codigo_produto,
+            "origem_match": "exato",
         }
+        resultado[codigo] = info
+        if codigo_produto:
+            produto_map.setdefault(codigo_produto, []).append(info)
+    # Guardamos também o índice por CÓD. PRODUTO. O barcode do SofStore
+    # contém o código do produto embutido; isso permite recuperar variantes
+    # de tamanho/cor que não aparecem na planilha de detalhamento atual.
+    resultado["__produto_map__"] = produto_map
     return resultado
 
 
@@ -1264,24 +1277,57 @@ def classificar_marca_analise(descricao, referencia, marcas):
     return melhor
 
 
+def encontrar_detalhamento_por_codigo(codigo, detalhamento):
+    """Tenta casar o barcode por código exato e, depois, pelo CÓD. PRODUTO embutido no barcode."""
+    info = detalhamento.get(codigo)
+    if info is not None:
+        return info
+
+    produto_map = detalhamento.get("__produto_map__", {})
+    candidatos = []
+    for codigo_produto, infos in produto_map.items():
+        if len(codigo_produto) >= 4 and codigo_produto in codigo:
+            # Um CÓD. PRODUTO pode aparecer em várias variantes; todas elas
+            # representam a mesma descrição/referência base para a análise de grupo.
+            candidatos.append((len(codigo_produto), codigo_produto, infos))
+
+    if not candidatos:
+        return None
+
+    maior_tamanho = max(x[0] for x in candidatos)
+    melhores = [x for x in candidatos if x[0] == maior_tamanho]
+    if len(melhores) != 1:
+        # Se houver mais de um código de produto de mesmo tamanho dentro do
+        # barcode, só aceitamos quando todas as descrições/referências coincidem.
+        assinaturas = set()
+        for _, _, infos in melhores:
+            for i in infos:
+                assinaturas.add((i.get("descricao", ""), i.get("referencia", "")))
+        if len(assinaturas) != 1:
+            return None
+
+    info_base = melhores[0][2][0].copy()
+    info_base["origem_match"] = "código do produto"
+    return info_base
+
+
 def construir_analise_rua1(estoque_total, estoque_rua1, detalhamento, grupos, marcas):
     linhas = []
-    qtd_total = sum(estoque_total.values())
-    qtd_r1 = sum(estoque_rua1.values())
-    qtd_r1_fora_total = 0.0
     grupos_norm = grupos or []
     marcas_norm = marcas or []
     for codigo, quantidade_total in estoque_total.items():
-        info = detalhamento.get(codigo)
+        info = encontrar_detalhamento_por_codigo(codigo, detalhamento)
         qtd_r1_codigo = min(float(estoque_rua1.get(codigo, 0)), float(quantidade_total))
         if qtd_r1_codigo <= 0 and info is None:
             continue
         if info is None:
             grupo = "⚠️ Sem detalhamento"
             marca = "⚠️ Sem marca"
+            origem_match = "não encontrado"
         else:
             grupo = classificar_grupo_analise(info.get("descricao", ""), info.get("referencia", ""), grupos_norm) or "⚠️ Grupo não mapeado"
             marca = classificar_marca_analise(info.get("descricao", ""), info.get("referencia", ""), marcas_norm) or "⚠️ Marca não mapeada"
+            origem_match = info.get("origem_match", "exato")
         linhas.append({
             "Código de Barras": codigo,
             "Grupo": grupo,
@@ -1289,14 +1335,21 @@ def construir_analise_rua1(estoque_total, estoque_rua1, detalhamento, grupos, ma
             "Total": float(quantidade_total),
             "Rua 1": qtd_r1_codigo,
             "Outras Ruas": max(float(quantidade_total) - qtd_r1_codigo, 0),
+            "Origem do vínculo": origem_match,
         })
     df = pd.DataFrame(linhas)
     if df.empty:
-        return df
+        return df, {"exato": 0, "produto": 0, "nao_encontrado": 0}
+    contagem_match = df["Origem do vínculo"].value_counts().to_dict()
+    contagem_match = {
+        "exato": int(contagem_match.get("exato", 0)),
+        "produto": int(contagem_match.get("código do produto", 0)),
+        "nao_encontrado": int(contagem_match.get("não encontrado", 0)),
+    }
     resumo = df.groupby(["Grupo", "Marca"], as_index=False)[["Total", "Rua 1", "Outras Ruas"]].sum()
     resumo["% Rua 1"] = np.where(resumo["Total"] > 0, resumo["Rua 1"] / resumo["Total"] * 100, 0)
     resumo = resumo.sort_values(["Grupo", "Marca"]).reset_index(drop=True)
-    return resumo
+    return resumo, {**contagem_match, "linhas_detalhadas": df}
 
 # ==========================================
 # RELATÓRIO DE ESTOQUE IMPORTADO (HISTÓRICO DE IMPORTAÇÕES)
@@ -2565,7 +2618,7 @@ elif st.session_state.aba_ativa_selecionada == "📊 Análise Rua 1 por Grupo":
             if not marcas_oficiais:
                 marcas_oficiais = []
 
-            df_analise = construir_analise_rua1(estoque_total, estoque_r1, detalhamento, grupos_oficiais, marcas_oficiais)
+            df_analise, metadados_match = construir_analise_rua1(estoque_total, estoque_r1, detalhamento, grupos_oficiais, marcas_oficiais)
             total_geral = float(sum(estoque_total.values()))
             total_r1 = float(min(sum(estoque_r1.values()), total_geral))
             total_outros = max(total_geral - total_r1, 0)
@@ -2575,6 +2628,11 @@ elif st.session_state.aba_ativa_selecionada == "📊 Análise Rua 1 por Grupo":
             k2.metric("Rua 1", f"{total_r1:,.0f}")
             k3.metric("Demais ruas", f"{total_outros:,.0f}")
             k4.metric("% do estoque na Rua 1", f"{(total_r1/total_geral*100 if total_geral else 0):.1f}%")
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("✅ Códigos exatos", f"{metadados_match.get('exato', 0):,}")
+            m2.metric("🔎 Recuperados por CÓD. PRODUTO", f"{metadados_match.get('produto', 0):,}")
+            m3.metric("⚠️ Ainda não encontrados", f"{metadados_match.get('nao_encontrado', 0):,}")
 
             if df_analise.empty:
                 st.warning("Nenhum item pôde ser cruzado entre os arquivos enviados.")
@@ -2613,7 +2671,23 @@ elif st.session_state.aba_ativa_selecionada == "📊 Análise Rua 1 por Grupo":
                         hide_index=True,
                     )
 
-                st.caption("Os códigos presentes no CSV de estoque que não possuem correspondência no XLSX aparecem como 'Sem detalhamento'. Grupos e marcas são classificados a partir do detalhamento e, quando fornecido, da lista oficial do PDF do SofStore.")
+                linhas_match = metadados_match.get("linhas_detalhadas", pd.DataFrame())
+                with st.expander("⚠️ Ver códigos que ainda precisam de revisão"):
+                    if linhas_match.empty:
+                        st.info("Nenhum código para revisão.")
+                    else:
+                        pendentes = linhas_match[linhas_match["Origem do vínculo"] == "não encontrado"].copy()
+                        if pendentes.empty:
+                            st.success("✅ Todos os códigos do estoque foram vinculados por código exato ou CÓD. PRODUTO.")
+                        else:
+                            cols_rev = ["Código de Barras", "Total", "Rua 1", "Outras Ruas", "Grupo", "Marca"]
+                            st.dataframe(
+                                pendentes[cols_rev].sort_values("Total", ascending=False).style.format({"Total": "{:,.0f}", "Rua 1": "{:,.0f}", "Outras Ruas": "{:,.0f}"}),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+
+                st.caption("A correspondência usa primeiro o código de barras exato. Quando ele não existe no XLSX, o sistema tenta recuperar o produto pelo CÓD. PRODUTO embutido no barcode, sem inventar uma correspondência ambígua.")
 
         except Exception as e:
             st.error(f"❌ Não foi possível processar os arquivos: {e}")
