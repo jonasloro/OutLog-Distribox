@@ -1,4 +1,3 @@
-import collections
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -8,10 +7,6 @@ import os
 import binascii
 import hmac
 import base64
-import csv
-import unicodedata
-import zipfile
-import xml.etree.ElementTree as ET
 from io import BytesIO
 from PIL import Image
 from datetime import datetime
@@ -30,7 +25,6 @@ except ImportError:
 
 try:
     import psycopg2
-    from psycopg2.extras import execute_values
     PSYCOPG2_DISPONIVEL = True
 except ImportError:
     PSYCOPG2_DISPONIVEL = False
@@ -59,7 +53,7 @@ st.set_page_config(
 # BLOCO 1: CAMADA DE DADOS E ESTADO DO SISTEMA
 # ==========================================
 
-ESTRUTURA_CD_PADRAO = {
+ESTRUTURA_CD = {
     "Rua 01": {"tipo": "Morta", "cols_impar": [], "cols_par": []},
     "Rua 02": {"tipo": "Misto_Transicao", "cols_impar": list(range(21, 94, 2)), "cols_par": list(range(22, 103, 2)) + list(range(103, 141))},
     "Rua 03": {"tipo": "P", "cols_impar": list(range(1, 101, 2)), "cols_par": list(range(2, 102, 2))},
@@ -86,7 +80,7 @@ ESTRUTURA_CD_PADRAO = {
 # Mapeamento de gênero por rua, conforme sua apresentação (slides "Estoque
 # Feminino" e "Estoque Masculino"). Usado para escolher a tabela de
 # capacidade correta.
-RUA_GENERO_PADRAO = {
+RUA_GENERO = {
     "Rua 02": "Feminino", "Rua 03": "Feminino", "Rua 04": "Feminino",
     "Rua 05": "Feminino", "Rua 06": "Feminino", "Rua 07": "Feminino",
     "Rua 08": "Feminino", "Rua 09": "Feminino", "Rua 10": "Feminino",
@@ -97,6 +91,11 @@ RUA_GENERO_PADRAO = {
 }
 
 def obter_genero_rua(rua_nome):
+    estrutura = globals().get("ESTRUTURA_CD") or {}
+    cfg = estrutura.get(rua_nome) or {}
+    genero_bd = cfg.get("genero")
+    if genero_bd:
+        return str(genero_bd)
     return RUA_GENERO.get(rua_nome, "Feminino")
 
 NIVEIS_G = ["B", "E", "H", "K", "N", "Q", "T"]
@@ -112,7 +111,7 @@ NIVEIS_METAL_5 = ["B", "C", "D", "E", "F"]
 # sempre o MÍNIMO da faixa (decisão tomada com você: mais conservador).
 # None = combinação proibida (ex: jaqueta pesada em aramado).
 
-CAPACIDADE_VERAO_FEMININO_PADRAO = {
+CAPACIDADE_VERAO_FEMININO = {
     "Regatas/Bodys/Tops/Croppeds":              {"P": (8, 10),  "M": (16, 20), "G": (35, 40), "Metal Raso (GG)": (80, 100),  "Madeira/Metal Prof. (3G)": (180, 220)},
     "Camisetas/Camisas M.Curta Finas":          {"P": (7, 8),   "M": (14, 16), "G": (28, 32), "Metal Raso (GG)": (60, 70),   "Madeira/Metal Prof. (3G)": (130, 160)},
     "Shorts Finos/Bermudas Verão/Saia":         {"P": (5, 6),   "M": (10, 12), "G": (20, 24), "Metal Raso (GG)": (45, 55),   "Madeira/Metal Prof. (3G)": (100, 120)},
@@ -122,7 +121,7 @@ CAPACIDADE_VERAO_FEMININO_PADRAO = {
     "Vestidos Longos":                          {"P": (1, 2),   "M": (3, 4),   "G": (7, 8),   "Metal Raso (GG)": (15, 18),   "Madeira/Metal Prof. (3G)": (30, 40)},
 }
 
-CAPACIDADE_INVERNO_FEMININO_PADRAO = {
+CAPACIDADE_INVERNO_FEMININO = {
     "Camisetas M.Longa/Cacharrel Fina":     {"P": (5, 6), "M": (10, 12), "G": (20, 24), "Metal Raso (GG)": (40, 50), "Madeira/Metal Prof. (3G)": (90, 110)},
     "Tricots Leves/Blusões Finos":          {"P": (3, 4), "M": (6, 8),   "G": (12, 15), "Metal Raso (GG)": (25, 30), "Madeira/Metal Prof. (3G)": (55, 70)},
     "Calças Jeans/Moletons/Corduroy":       {"P": (2, 3), "M": (4, 5),   "G": (8, 10),  "Metal Raso (GG)": (20, 25), "Madeira/Metal Prof. (3G)": (45, 55)},
@@ -133,13 +132,10 @@ CAPACIDADE_INVERNO_FEMININO_PADRAO = {
 # ⚠️ PLACEHOLDER: ainda não recebi a tabela real de capacidade do estoque
 # MASCULINO. Até você me passar os números, as ruas masculinas usam a
 # tabela feminina como estimativa provisória (a UI avisa isso claramente).
-CAPACIDADE_VERAO_MASCULINO_PADRAO = CAPACIDADE_VERAO_FEMININO_PADRAO
-CAPACIDADE_INVERNO_MASCULINO_PADRAO = CAPACIDADE_INVERNO_FEMININO_PADRAO
+CAPACIDADE_VERAO_MASCULINO = CAPACIDADE_VERAO_FEMININO
+CAPACIDADE_INVERNO_MASCULINO = CAPACIDADE_INVERNO_FEMININO
 
 ESTACOES_PECA = ["Verão", "Inverno", "Meia-Estação"]
-
-# As variáveis de trabalho são inicializadas depois que todos os padrões
-# estiverem definidos. Elas servem como fallback até o Supabase ser carregado.
 
 def obter_tabelas_genero(genero):
     if genero == "Masculino":
@@ -149,15 +145,15 @@ def obter_tabelas_genero(genero):
 # Meia-Estação não teve tabela própria na apresentação — reaproveita a de
 # Verão (feminina ou masculina, conforme a rua) até você me passar uma
 # tabela específica.
-CATEGORIAS_POR_ESTACAO_FEMININO_PADRAO = {
-    "Verão": list(CAPACIDADE_VERAO_FEMININO_PADRAO.keys()),
-    "Meia-Estação": list(CAPACIDADE_VERAO_FEMININO_PADRAO.keys()),
-    "Inverno": list(CAPACIDADE_INVERNO_FEMININO_PADRAO.keys()),
+CATEGORIAS_POR_ESTACAO_FEMININO = {
+    "Verão": list(CAPACIDADE_VERAO_FEMININO.keys()),
+    "Meia-Estação": list(CAPACIDADE_VERAO_FEMININO.keys()),
+    "Inverno": list(CAPACIDADE_INVERNO_FEMININO.keys()),
 }
-CATEGORIAS_POR_ESTACAO_MASCULINO_PADRAO = {
-    "Verão": list(CAPACIDADE_VERAO_MASCULINO_PADRAO.keys()),
-    "Meia-Estação": list(CAPACIDADE_VERAO_MASCULINO_PADRAO.keys()),
-    "Inverno": list(CAPACIDADE_INVERNO_MASCULINO_PADRAO.keys()),
+CATEGORIAS_POR_ESTACAO_MASCULINO = {
+    "Verão": list(CAPACIDADE_VERAO_MASCULINO.keys()),
+    "Meia-Estação": list(CAPACIDADE_VERAO_MASCULINO.keys()),
+    "Inverno": list(CAPACIDADE_INVERNO_MASCULINO.keys()),
 }
 
 def obter_categorias_por_estacao(genero):
@@ -202,7 +198,7 @@ TRAVA_MAXIMA_M_VESTIDOS = 4     # vestidos em casulo M
 # enquanto (aguardando mapeamento físico exato). Onde não há densidade fixa
 # aqui (feminino, e os tipos GG/madeira ainda não cobertos), o sistema cai
 # para a tabela por categoria.
-CAPACIDADE_FIXA_POR_RUA_PADRAO = {
+CAPACIDADE_FIXA_POR_RUA = {
     "Rua 15": {"aramado_M": 7, "aramado_G": 12},
     "Rua 16": {"aramado_G": 10},
     "Rua 17": {"aramado_G": 12},
@@ -211,18 +207,6 @@ CAPACIDADE_FIXA_POR_RUA_PADRAO = {
     "Rua 20": {"aramado_P": 6},
     "Rua 21": {"metal_raso": 40},
 }
-
-# Fonte em código apenas como fallback. Na inicialização, estas estruturas
-# são substituídas pelos dados persistidos no Supabase quando disponíveis.
-ESTRUTURA_CD = dict(ESTRUTURA_CD_PADRAO)
-RUA_GENERO = dict(RUA_GENERO_PADRAO)
-CAPACIDADE_VERAO_FEMININO = dict(CAPACIDADE_VERAO_FEMININO_PADRAO)
-CAPACIDADE_INVERNO_FEMININO = dict(CAPACIDADE_INVERNO_FEMININO_PADRAO)
-CAPACIDADE_VERAO_MASCULINO = dict(CAPACIDADE_VERAO_MASCULINO_PADRAO)
-CAPACIDADE_INVERNO_MASCULINO = dict(CAPACIDADE_INVERNO_MASCULINO_PADRAO)
-CATEGORIAS_POR_ESTACAO_FEMININO = dict(CATEGORIAS_POR_ESTACAO_FEMININO_PADRAO)
-CATEGORIAS_POR_ESTACAO_MASCULINO = dict(CATEGORIAS_POR_ESTACAO_MASCULINO_PADRAO)
-CAPACIDADE_FIXA_POR_RUA = dict(CAPACIDADE_FIXA_POR_RUA_PADRAO)
 
 def obter_chave_casulo(rua_nome, lado, coluna, nivel):
     try:
@@ -415,357 +399,97 @@ def renderizar_cabecalho_colunas(lista_colunas):
 # ==========================================
 # PERSISTÊNCIA EM BANCO DE DADOS (POSTGRES/SUPABASE)
 # ==========================================
-# O app usa o Session Pooler do Supabase por PostgreSQL.
-# As credenciais ficam protegidas nos Secrets do Streamlit.
-#
-# Formato recomendado dos Secrets atuais:
-# SUPABASE_HOST = "aws-0-ca-central-1.pooler.supabase.com"
-# SUPABASE_PORT = "5432"
-# SUPABASE_DATABASE = "postgres"
-# SUPABASE_USER = "postgres.<project-ref>"
-# SUPABASE_PASSWORD = "..."
-#
-# Também aceitamos a configuração antiga [postgres], caso ela ainda exista,
-# para não quebrar instalações antigas durante a transição.
-
-def _obter_config_bd():
-    """Retorna as credenciais do banco a partir dos Secrets do Streamlit."""
-    try:
-        if "SUPABASE_HOST" in st.secrets:
-            return {
-                "host": st.secrets["SUPABASE_HOST"],
-                "port": int(st.secrets.get("SUPABASE_PORT", 5432)),
-                "dbname": st.secrets.get("SUPABASE_DATABASE", "postgres"),
-                "user": st.secrets["SUPABASE_USER"],
-                "password": st.secrets["SUPABASE_PASSWORD"],
-            }
-
-        if "postgres" in st.secrets:
-            cfg = st.secrets["postgres"]
-            return {
-                "host": cfg["host"],
-                "port": int(cfg.get("port", 5432)),
-                "dbname": cfg.get("dbname", "postgres"),
-                "user": cfg["user"],
-                "password": cfg["password"],
-            }
-    except Exception as e:
-        st.session_state.ultimo_erro_bd = f"Secrets do banco inválidos/incompletos: {e}"
-        return None
-
-    st.session_state.ultimo_erro_bd = (
-        "Secrets do banco não configurados. Use SUPABASE_HOST, SUPABASE_PORT, "
-        "SUPABASE_DATABASE, SUPABASE_USER e SUPABASE_PASSWORD em "
-        "Settings → Secrets do Streamlit."
-    )
-    return None
+# Se o banco não estiver configurado (sem st.secrets["postgres"]) ou a conexão
+# falhar, o app cai de volta pro comportamento em memória (session_state) sem
+# quebrar — só avisa que a mudança não foi salva de forma permanente.
 
 def obter_conexao_bd():
     if not PSYCOPG2_DISPONIVEL:
-        st.session_state.ultimo_erro_bd = (
-            "biblioteca 'psycopg2-binary' não instalada — "
-            "adicione psycopg2-binary ao requirements.txt do repositório"
-        )
+        st.session_state.ultimo_erro_bd = "biblioteca 'psycopg2-binary' não instalada — falta adicionar no requirements.txt do repositório"
         return None
-
-    cfg = _obter_config_bd()
-    if cfg is None:
+    try:
+        cfg = st.secrets["postgres"]
+    except Exception:
+        st.session_state.ultimo_erro_bd = "sem seção [postgres] configurada em Settings → Secrets no Streamlit Cloud"
         return None
-
     try:
         conn = psycopg2.connect(
-            host=cfg["host"],
-            port=cfg["port"],
-            dbname=cfg["dbname"],
-            user=cfg["user"],
-            password=cfg["password"],
-            sslmode="require",
-            connect_timeout=10,
+            host=cfg["host"], port=cfg["port"], dbname=cfg["dbname"],
+            user=cfg["user"], password=cfg["password"], sslmode="require",
+            connect_timeout=5,
         )
         st.session_state.ultimo_erro_bd = None
         return conn
     except Exception as e:
-        st.session_state.ultimo_erro_bd = f"falha ao conectar no Postgres/Supabase: {e}"
+        st.session_state.ultimo_erro_bd = f"falha ao conectar no Postgres: {e}"
         return None
 
-def testar_conexao_bd():
-    """Testa a conexão e fecha o socket para não deixar conexões penduradas."""
-    conn = obter_conexao_bd()
-    if conn is None:
-        return False
-    try:
-        conn.close()
-        return True
-    except Exception as e:
-        st.session_state.ultimo_erro_bd = f"falha ao fechar conexão de teste: {e}"
-        return False
-
-# ==========================================
-# CONFIGURAÇÕES DO CD NO SUPABASE
-# ==========================================
-
-def _parse_lista_inteiros_config(valor):
-    if valor is None or (isinstance(valor, float) and pd.isna(valor)):
+def _normalizar_array_bd(valor):
+    """Normaliza um PostgreSQL ARRAY para lista de inteiros."""
+    if valor is None:
         return []
     if isinstance(valor, (list, tuple)):
         itens = valor
     else:
-        itens = re.split(r"[,;\s]+", str(valor).strip())
+        txt = str(valor).strip()
+        if txt.startswith("{") and txt.endswith("}"):
+            txt = txt[1:-1]
+        itens = [x.strip() for x in txt.split(",") if x.strip()]
     resultado = []
     for item in itens:
-        if item in (None, ""):
-            continue
         try:
             resultado.append(int(item))
-        except (TypeError, ValueError):
-            raise ValueError(f"Lista contém valor inválido: {item}")
-    return resultado
+        except (ValueError, TypeError):
+            pass
+    return sorted(set(resultado))
 
-def _lista_para_texto_config(valor):
-    return ", ".join(str(int(x)) for x in (valor or []))
 
-def _reconstruir_indices_capacidade():
-    global CATEGORIAS_POR_ESTACAO_FEMININO, CATEGORIAS_POR_ESTACAO_MASCULINO
-    CATEGORIAS_POR_ESTACAO_FEMININO = {
-        estacao: list(CAPACIDADE_VERAO_FEMININO.keys()) if estacao == "Meia-Estação" else list((CAPACIDADE_VERAO_FEMININO if estacao == "Verão" else CAPACIDADE_INVERNO_FEMININO).keys())
-        for estacao in ESTACOES_PECA
-    }
-    CATEGORIAS_POR_ESTACAO_MASCULINO = {
-        estacao: list(CAPACIDADE_VERAO_MASCULINO.keys()) if estacao == "Meia-Estação" else list((CAPACIDADE_VERAO_MASCULINO if estacao == "Verão" else CAPACIDADE_INVERNO_MASCULINO).keys())
-        for estacao in ESTACOES_PECA
-    }
-
-def _aplicar_configuracoes_do_banco(linhas_estrutura, linhas_capacidade, linhas_fixas):
-    global ESTRUTURA_CD, RUA_GENERO
-    global CAPACIDADE_VERAO_FEMININO, CAPACIDADE_INVERNO_FEMININO
-    global CAPACIDADE_VERAO_MASCULINO, CAPACIDADE_INVERNO_MASCULINO
-    global CAPACIDADE_FIXA_POR_RUA
-
-    estrutura_nova = {}
-    genero_novo = {}
-    for row in linhas_estrutura:
-        rua, tipo, genero, cols_impar, cols_par, cols_seq, metal, metal_cols = row
-        estrutura_nova[str(rua)] = {
-            "tipo": str(tipo or ""),
-            "cols_impar": [int(x) for x in (cols_impar or [])],
-            "cols_par": [int(x) for x in (cols_par or [])],
-        }
-        if cols_seq:
-            estrutura_nova[str(rua)]["cols_seq"] = [int(x) for x in cols_seq]
-        if metal:
-            estrutura_nova[str(rua)]["metal"] = [int(x) for x in metal]
-        if metal_cols:
-            estrutura_nova[str(rua)]["metal_cols"] = [int(x) for x in metal_cols]
-        genero_novo[str(rua)] = str(genero or "Feminino")
-
-    if estrutura_nova:
-        ESTRUTURA_CD = estrutura_nova
-        RUA_GENERO = genero_novo
-
-    tabelas = {
-        "Feminino": {"Verão": {}, "Inverno": {}, "Meia-Estação": {}},
-        "Masculino": {"Verão": {}, "Inverno": {}, "Meia-Estação": {}},
-    }
-    for row in linhas_capacidade:
-        genero, estacao, categoria, tipo_casulo, minimo, maximo = row
-        genero = str(genero)
-        estacao = str(estacao)
-        categoria = str(categoria)
-        tipo_casulo = str(tipo_casulo)
-        faixa = None if minimo is None or maximo is None else (int(minimo), int(maximo))
-        tabelas.setdefault(genero, {}).setdefault(estacao, {})
-        tabelas[genero][estacao].setdefault(categoria, {})[tipo_casulo] = faixa
-
-    CAPACIDADE_VERAO_FEMININO = tabelas.get("Feminino", {}).get("Verão", {})
-    CAPACIDADE_INVERNO_FEMININO = tabelas.get("Feminino", {}).get("Inverno", {})
-    CAPACIDADE_VERAO_MASCULINO = tabelas.get("Masculino", {}).get("Verão", {})
-    CAPACIDADE_INVERNO_MASCULINO = tabelas.get("Masculino", {}).get("Inverno", {})
-
-    fixa_nova = {}
-    for row in linhas_fixas:
-        rua, tipo_casulo, capacidade = row
-        fixa_nova.setdefault(str(rua), {})[str(tipo_casulo)] = int(capacidade)
-    if fixa_nova:
-        CAPACIDADE_FIXA_POR_RUA = fixa_nova
-
-    _reconstruir_indices_capacidade()
-
-def carregar_configuracoes_do_banco():
+def carregar_estrutura_cd_do_banco():
+    """Carrega a estrutura física diretamente de public.casulos_estrutura."""
     conn = obter_conexao_bd()
     if conn is None:
-        return False
+        return None
     try:
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT rua, tipo, genero, cols_impar, cols_par, cols_seq, metal, metal_cols
-                FROM casulos_estrutura ORDER BY rua
+                FROM public.casulos_estrutura
+                ORDER BY id
             """)
-            linhas_estrutura = cur.fetchall()
-            cur.execute("""
-                SELECT genero, estacao, categoria, tipo_casulo, minimo_pecas, maximo_pecas
-                FROM capacidade_categoria
-                ORDER BY genero, estacao, categoria, tipo_casulo
-            """)
-            linhas_capacidade = cur.fetchall()
-            cur.execute("""
-                SELECT rua, tipo_casulo, capacidade
-                FROM capacidade_fixa_rua ORDER BY rua, tipo_casulo
-            """)
-            linhas_fixas = cur.fetchall()
-        conn.close()
-        if not linhas_estrutura or not linhas_capacidade:
-            st.session_state.ultimo_erro_bd = "as tabelas de configuração existem, mas estão vazias"
-            return False
-        _aplicar_configuracoes_do_banco(linhas_estrutura, linhas_capacidade, linhas_fixas)
-        st.session_state.ultimo_erro_bd = None
-        return True
-    except Exception as e:
-        try: conn.close()
-        except Exception: pass
-        st.session_state.ultimo_erro_bd = f"falha ao carregar configurações: {e}"
-        return False
-
-def carregar_estrutura_para_editor():
-    conn = obter_conexao_bd()
-    if conn is None: return None
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT rua, tipo, genero, cols_impar, cols_par, cols_seq, metal, metal_cols FROM casulos_estrutura ORDER BY rua")
             rows = cur.fetchall()
         conn.close()
-        return pd.DataFrame([{
-            "Rua": r, "Tipo": tipo, "Gênero": genero,
-            "Colunas Ímpares": _lista_para_texto_config(cols_impar),
-            "Colunas Pares": _lista_para_texto_config(cols_par),
-            "Colunas Sequenciais": _lista_para_texto_config(cols_seq),
-            "Metais": _lista_para_texto_config(metal),
-            "Metais Colunas": _lista_para_texto_config(metal_cols),
-        } for r, tipo, genero, cols_impar, cols_par, cols_seq, metal, metal_cols in rows])
+
+        if not rows:
+            st.session_state.ultimo_erro_bd = "public.casulos_estrutura está vazia"
+            return None
+
+        estrutura = {}
+        for rua, tipo, genero, cols_impar, cols_par, cols_seq, metal, metal_cols in rows:
+            nome = str(rua).strip()
+            cfg = {
+                "tipo": str(tipo or "").strip(),
+                "genero": str(genero or "").strip(),
+                "cols_impar": _normalizar_array_bd(cols_impar),
+                "cols_par": _normalizar_array_bd(cols_par),
+            }
+            seq = _normalizar_array_bd(cols_seq)
+            metal_arr = _normalizar_array_bd(metal)
+            metal_cols_arr = _normalizar_array_bd(metal_cols)
+            if seq:
+                cfg["cols_seq"] = seq
+            if metal_arr:
+                cfg["metal"] = metal_arr
+            if metal_cols_arr:
+                cfg["metal_cols"] = metal_cols_arr
+            estrutura[nome] = cfg
+        return estrutura
     except Exception as e:
-        try: conn.close()
-        except Exception: pass
-        st.session_state.ultimo_erro_bd = f"falha ao carregar estrutura para edição: {e}"
+        try:
+            conn.close()
+        except Exception:
+            pass
+        st.session_state.ultimo_erro_bd = f"falha ao carregar estrutura do CD: {e}"
         return None
-
-def salvar_estrutura_do_editor(df):
-    conn = obter_conexao_bd()
-    if conn is None: return False
-    try:
-        registros, ruas_vistas = [], set()
-        for _, row in df.iterrows():
-            rua, tipo, genero = str(row.get("Rua", "")).strip(), str(row.get("Tipo", "")).strip(), str(row.get("Gênero", "")).strip()
-            if not rua: raise ValueError("Existe uma linha sem Rua.")
-            if rua in ruas_vistas: raise ValueError(f"A rua {rua} está duplicada.")
-            if genero not in {"Feminino", "Masculino"}: raise ValueError(f"Gênero inválido na {rua}: {genero}")
-            ruas_vistas.add(rua)
-            registros.append((rua, tipo, genero,
-                _parse_lista_inteiros_config(row.get("Colunas Ímpares", "")),
-                _parse_lista_inteiros_config(row.get("Colunas Pares", "")),
-                _parse_lista_inteiros_config(row.get("Colunas Sequenciais", "")),
-                _parse_lista_inteiros_config(row.get("Metais", "")),
-                _parse_lista_inteiros_config(row.get("Metais Colunas", ""))))
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM casulos_estrutura")
-            cur.executemany("""
-                INSERT INTO casulos_estrutura
-                (rua, tipo, genero, cols_impar, cols_par, cols_seq, metal, metal_cols)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """, registros)
-        conn.commit(); conn.close()
-        return carregar_configuracoes_do_banco()
-    except Exception as e:
-        try: conn.rollback(); conn.close()
-        except Exception: pass
-        st.session_state.ultimo_erro_bd = f"falha ao salvar estrutura: {e}"
-        return False
-
-def carregar_capacidade_para_editor():
-    conn = obter_conexao_bd()
-    if conn is None: return None
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT genero, estacao, categoria, tipo_casulo, minimo_pecas, maximo_pecas FROM capacidade_categoria ORDER BY genero, estacao, categoria, tipo_casulo")
-            rows = cur.fetchall()
-        conn.close()
-        return pd.DataFrame(rows, columns=["Gênero", "Estação", "Categoria", "Tipo de Casulo", "Mínimo", "Máximo"])
-    except Exception as e:
-        try: conn.close()
-        except Exception: pass
-        st.session_state.ultimo_erro_bd = f"falha ao carregar capacidades para edição: {e}"
-        return None
-
-def salvar_capacidade_do_editor(df):
-    conn = obter_conexao_bd()
-    if conn is None: return False
-    try:
-        tipos_validos = {"P", "M", "G", "Metal Raso (GG)", "Madeira/Metal Prof. (3G)"}
-        registros, chaves = [], set()
-        for _, row in df.iterrows():
-            genero, estacao, categoria, tipo = (str(row.get(k, "")).strip() for k in ["Gênero", "Estação", "Categoria", "Tipo de Casulo"])
-            if genero not in {"Feminino", "Masculino"}: raise ValueError(f"Gênero inválido: {genero}")
-            if estacao not in set(ESTACOES_PECA): raise ValueError(f"Estação inválida: {estacao}")
-            if not categoria: raise ValueError("Existe uma categoria vazia.")
-            if tipo not in tipos_validos: raise ValueError(f"Tipo de casulo inválido: {tipo}")
-            a, b = row.get("Mínimo"), row.get("Máximo")
-            vazio_a = a is None or (isinstance(a,float) and pd.isna(a)) or str(a).strip()==""
-            vazio_b = b is None or (isinstance(b,float) and pd.isna(b)) or str(b).strip()==""
-            if vazio_a != vazio_b: raise ValueError(f"A linha {categoria}/{tipo} precisa ter Mínimo e Máximo preenchidos ou ambos vazios.")
-            if vazio_a:
-                minimo = maximo = None
-            else:
-                minimo, maximo = int(a), int(b)
-                if minimo < 0 or maximo < 0 or minimo > maximo:
-                    raise ValueError(f"Faixa inválida em {categoria}/{tipo}: {minimo}-{maximo}")
-            chave=(genero,estacao,categoria,tipo)
-            if chave in chaves: raise ValueError(f"Combinação duplicada: {chave}")
-            chaves.add(chave); registros.append((genero,estacao,categoria,tipo,minimo,maximo))
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM capacidade_categoria")
-            cur.executemany("INSERT INTO capacidade_categoria (genero, estacao, categoria, tipo_casulo, minimo_pecas, maximo_pecas) VALUES (%s,%s,%s,%s,%s,%s)", registros)
-        conn.commit(); conn.close()
-        return carregar_configuracoes_do_banco()
-    except Exception as e:
-        try: conn.rollback(); conn.close()
-        except Exception: pass
-        st.session_state.ultimo_erro_bd = f"falha ao salvar capacidades: {e}"
-        return False
-
-def carregar_capacidade_fixa_para_editor():
-    conn=obter_conexao_bd()
-    if conn is None: return None
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT rua, tipo_casulo, capacidade FROM capacidade_fixa_rua ORDER BY rua, tipo_casulo")
-            rows=cur.fetchall()
-        conn.close(); return pd.DataFrame(rows, columns=["Rua","Tipo de Casulo","Capacidade"])
-    except Exception as e:
-        try: conn.close()
-        except Exception: pass
-        st.session_state.ultimo_erro_bd=f"falha ao carregar densidades fixas: {e}"; return None
-
-def salvar_capacidade_fixa_do_editor(df):
-    conn=obter_conexao_bd()
-    if conn is None: return False
-    try:
-        tipos_validos={"aramado_P","aramado_M","aramado_G","metal_raso","metal_profundo","madeira"}
-        registros=[]; chaves=set()
-        for _,row in df.iterrows():
-            rua=str(row.get("Rua","")).strip(); tipo=str(row.get("Tipo de Casulo","")).strip()
-            if not rua: raise ValueError("Existe uma linha sem Rua na densidade fixa.")
-            if tipo not in tipos_validos: raise ValueError(f"Tipo estrutural inválido: {tipo}")
-            capacidade=int(row.get("Capacidade"))
-            if capacidade<0: raise ValueError("A capacidade fixa não pode ser negativa.")
-            chave=(rua,tipo)
-            if chave in chaves: raise ValueError(f"Densidade fixa duplicada: {rua}/{tipo}")
-            chaves.add(chave); registros.append((rua,tipo,capacidade))
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM capacidade_fixa_rua")
-            cur.executemany("INSERT INTO capacidade_fixa_rua (rua,tipo_casulo,capacidade) VALUES (%s,%s,%s)", registros)
-        conn.commit(); conn.close(); return carregar_configuracoes_do_banco()
-    except Exception as e:
-        try: conn.rollback(); conn.close()
-        except Exception: pass
-        st.session_state.ultimo_erro_bd=f"falha ao salvar densidades fixas: {e}"; return False
 
 def carregar_estoque_do_banco():
     """Carrega o estoque salvo no banco pro formato do base_dados_cd
@@ -1003,781 +727,6 @@ def carregar_historico_movimentacoes(limite=200):
     return linhas
 
 # ==========================================
-# ANALISE DE ESTOQUE POR RUA / GRUPO / MARCA
-# ==========================================
-def normalizar_texto_analise(valor):
-    texto = unicodedata.normalize("NFKD", str(valor or "")).encode("ascii", "ignore").decode("ascii").upper()
-    texto = re.sub(r"[^A-Z0-9]+", " ", texto)
-    texto = re.sub(r"\s+", " ", texto).strip()
-    substituicoes = {
-        "MANGA LONGA": "ML",
-        "MANGA CURTA": "MC",
-        "FEMININO": "FEMIN",
-        "MASCULINO": "MASC",
-    }
-    for antigo, novo in substituicoes.items():
-        texto = texto.replace(antigo, novo)
-    return " ".join(texto.split())
-
-
-def ler_csv_estoque_upload(arquivo):
-    """Lê CSV do SofStore e retorna {codigo_barra: quantidade}."""
-    if arquivo is None:
-        return None
-    bruto = arquivo.getvalue()
-    texto = bruto.decode("utf-8-sig", errors="replace")
-    linhas = list(csv.reader(texto.splitlines(), delimiter=";"))
-    idx_cabecalho = None
-    for i, linha in enumerate(linhas):
-        if any(normalizar_texto_analise(x) == "CODIGO DE BARRAS" for x in linha):
-            idx_cabecalho = i
-            break
-    if idx_cabecalho is None:
-        raise ValueError("CSV não reconhecido: não encontrei a coluna 'codigo de barras'.")
-    cab = [normalizar_texto_analise(x) for x in linhas[idx_cabecalho]]
-    try:
-        idx_barra = cab.index("CODIGO DE BARRAS")
-        idx_qtd = cab.index("QUANTIDADE")
-    except ValueError:
-        raise ValueError("CSV precisa ter as colunas 'codigo de barras' e 'quantidade'.")
-    resultado = {}
-    for linha in linhas[idx_cabecalho + 1:]:
-        if len(linha) <= max(idx_barra, idx_qtd):
-            continue
-        codigo = re.sub(r"\D", "", str(linha[idx_barra]))
-        if not codigo:
-            continue
-        try:
-            qtd = float(str(linha[idx_qtd]).replace(",", ".").strip())
-        except Exception:
-            continue
-        resultado[codigo] = resultado.get(codigo, 0) + qtd
-    return resultado
-
-
-def ler_detalhamento_xlsx_upload(arquivo):
-    """Lê o XLSX de detalhamento sem depender de engine externo no Streamlit."""
-    if arquivo is None:
-        return {}
-    bruto = arquivo.getvalue()
-    ns = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
-    with zipfile.ZipFile(BytesIO(bruto)) as z:
-        nomes = z.namelist()
-        folha = "xl/worksheets/sheet1.xml"
-        if folha not in nomes:
-            raise ValueError("XLSX não possui a primeira planilha esperada (sheet1.xml).")
-        raiz = ET.fromstring(z.read(folha))
-        linhas = []
-        for row in raiz.findall(".//a:sheetData/a:row", ns):
-            vals = {}
-            for cell in row.findall("a:c", ns):
-                ref = cell.attrib.get("r", "")
-                col = re.sub(r"\d", "", ref)
-                tipo = cell.attrib.get("t")
-                if tipo == "inlineStr":
-                    is_el = cell.find("a:is", ns)
-                    valor = "" if is_el is None else "".join((t.text or "") for t in is_el.iter("{%s}t" % ns["a"]))
-                else:
-                    v = cell.find("a:v", ns)
-                    valor = v.text if v is not None else ""
-                vals[col] = valor
-            linhas.append(vals)
-    if not linhas:
-        return {}
-    cab = {normalizar_texto_analise(k): v for k, v in linhas[0].items()}
-    # O export do SofStore usa: A=CÓD. BARRAS, B=REFERÊNCIA, D=DESCRIÇÃO.
-    indice_barra = "A" if "A" in linhas[0] else None
-    if indice_barra is None:
-        raise ValueError("Não consegui localizar a coluna CÓD. BARRAS no XLSX.")
-    resultado = {}
-    produto_map = {}
-    for row in linhas[1:]:
-        codigo = re.sub(r"\D", "", str(row.get(indice_barra, "")))
-        if not codigo:
-            continue
-        descricao = str(row.get("D", ""))
-        referencia = str(row.get("B", ""))
-        codigo_produto = re.sub(r"\D", "", str(row.get("C", "")))
-        info = {
-            "descricao": descricao,
-            "referencia": referencia,
-            "codigo_produto": codigo_produto,
-            "origem_match": "exato",
-        }
-        resultado[codigo] = info
-        if codigo_produto:
-            produto_map.setdefault(codigo_produto, []).append(info)
-    # Guardamos também o índice por CÓD. PRODUTO. O barcode do SofStore
-    # contém o código do produto embutido; isso permite recuperar variantes
-    # de tamanho/cor que não aparecem na planilha de detalhamento atual.
-    resultado["__produto_map__"] = produto_map
-    return resultado
-
-
-
-def extrair_grupos_marcas_pdf_upload(arquivo):
-    """Extrai grupos/marcas oficiais e, quando possível, o limite de peças por Marca+Grupo.
-    O relatório do SofStore pode vir com quebras de linha diferentes; por isso usamos
-    o modo layout do pypdf e reconhecemos a linha de produto pelo trio:
-    QUANTIDADE + CUSTO + VENDA.
-    """
-    if arquivo is None or not PYPDF_DISPONIVEL:
-        return [], []
-
-    leitor = pypdf.PdfReader(BytesIO(arquivo.getvalue()))
-    texto = "\n".join(
-        (pagina.extract_text(extraction_mode="layout") or "")
-        for pagina in leitor.pages
-    )
-
-    padrao_linha_produto = re.compile(
-        r"^(.*?)\s+(\d+)\s+([\d\.]+,\d{2})\s+([\d\.]+,\d{2})\s*$"
-    )
-
-    grupos = []
-    marcas = []
-    grupo_atual = None
-
-    linhas = [x.rstrip() for x in texto.splitlines() if x.strip()]
-
-    for linha_bruta in linhas:
-        linha = " ".join(linha_bruta.split()).strip()
-        if not linha:
-            continue
-
-        up = linha.upper()
-
-        if up.startswith(("RESUMO DE ESTOQUE", "EMPRESAS:", "AGRUPADO POR:",
-                           "DETALHADO POR:", "EMITIR POR:", "CONSIDERAR ESTOQUE:",
-                           "EMITIR P.", "DESCRIÇÃO", "TOTAL P.", "00 - CD")):
-            continue
-
-        if up.startswith("SUBTOTAL") or re.match(r"^TOTAL\b", up):
-            continue
-
-        m = padrao_linha_produto.match(linha)
-        if m:
-            descricao_grupo = m.group(1).strip()
-            if grupo_atual:
-                grupos.append(grupo_atual)
-            # A linha reconhecida aqui é um item do grupo atual, e não um cabeçalho.
-            # A marca é o cabeçalho anterior; guardamos as marcas encontradas abaixo
-            continue
-
-        # Cabeçalho de marca: linha textual sem números, após normalização.
-        if not re.search(r"\d", linha) and len(linha) > 2:
-            # Não tratar textos de cabeçalho como marca.
-            if up in {"CD", "CUSTO", "VENDAESTOQUE", "ESTOQUE", "DESCRIÇÃO"}:
-                continue
-            marca = re.sub(r"\s+(L|N|PROMO)$", "", linha, flags=re.I).strip()
-            if marca and not up.startswith(("RESUMO", "AGRUPADO", "DETALHADO", "EMITIR", "CONSIDERAR")):
-                marcas.append(marca)
-                grupo_atual = None
-
-    # Lista oficial de grupos: fazemos uma segunda passada, robusta, capturando
-    # subtítulos de grupos dos PDFs que são emitidos em "GRUPO x MARCA".
-    grupos_texto = set()
-    marca_atual = None
-    for linha_bruta in linhas:
-        linha = " ".join(linha_bruta.split()).strip()
-        if not linha:
-            continue
-        up = linha.upper()
-
-        if up.startswith(("RESUMO DE ESTOQUE", "EMPRESAS:", "AGRUPADO POR:",
-                           "DETALHADO POR:", "EMITIR POR:", "CONSIDERAR ESTOQUE:",
-                           "EMITIR P.", "DESCRIÇÃO", "TOTAL P.", "00 - CD")):
-            continue
-        if up.startswith("SUBTOTAL") or re.match(r"^TOTAL\b", up):
-            continue
-
-        m = padrao_linha_produto.match(linha)
-        if m:
-            continue
-
-        if not re.search(r"\d", linha) and len(linha) > 2:
-            cand = re.sub(r"\s+(L|N|PROMO)$", "", linha, flags=re.I).strip()
-            if cand and not cand.upper().startswith(("RESUMO", "EMPRESAS", "AGRUPADO", "DETALHADO", "EMITIR", "CONSIDERAR")):
-                # Nesta versão do relatório o cabeçalho textual é a MARCA.
-                marca_atual = cand
-
-    # O conjunto real de grupos vem das linhas de produto.
-    # Mantemos somente descrições que o classificador reconhece como grupo oficial.
-    grupos_candidatos = []
-    for linha_bruta in linhas:
-        linha = " ".join(linha_bruta.split()).strip()
-        m = padrao_linha_produto.match(linha)
-        if m:
-            g = m.group(1).strip()
-            if g and len(g) > 2:
-                grupos_candidatos.append(g)
-
-    for g in grupos_candidatos:
-        grupos_texto.add(g)
-
-    # Deduplicação / normalização
-    grupos_unicos = []
-    vistos_g = set()
-    for g in grupos_texto:
-        k = normalizar_texto_analise(g)
-        if k and k not in vistos_g:
-            vistos_g.add(k)
-            grupos_unicos.append(g)
-
-    marcas_unicas = []
-    vistos_m = set()
-    for m in marcas:
-        k = normalizar_texto_analise(m)
-        if k and k not in vistos_m:
-            vistos_m.add(k)
-            marcas_unicas.append(m)
-
-    return sorted(grupos_unicos), sorted(marcas_unicas)
-
-
-def extrair_mapa_oficial_grupo_marca_pdf(arquivo):
-    """Extrai o mapa oficial (marca, grupo) -> quantidade do SofStore.
-
-    Suporta os dois layouts que o SofStore já gerou neste projeto:
-      1) Agrupado por: GRUPO | Detalhado por: MARCA
-         Ex.: BLUSA FEMIN: / MAX GLAMM 1953 ...
-      2) Agrupado por: MARCA | Detalhado por: GRUPO
-         Ex.: MAX GLAMM / BLUSA FEMIN 1953 ...
-
-    Remove SOMENTE os grupos SACOLA e SUPRIMENTO.
-    O total oficial usado pela análise é a soma das linhas válidas,
-    nunca o TOTAL bruto do PDF.
-    """
-    if arquivo is None or not PYPDF_DISPONIVEL:
-        return {}, [], [], 0
-
-    leitor = pypdf.PdfReader(BytesIO(arquivo.getvalue()))
-    paginas = []
-    for pagina in leitor.pages:
-        try:
-            txt = pagina.extract_text(extraction_mode='layout') or ''
-        except TypeError:
-            txt = pagina.extract_text() or ''
-        paginas.append(txt)
-    texto = '\n'.join(paginas)
-
-    # Descobre a orientação pelo cabeçalho do próprio PDF.
-    header = ' '.join(texto.upper().split())
-    if 'AGRUPADO POR: GRUPO' in header:
-        orientacao = 'GRUPO_MARCA'
-    elif 'AGRUPADO POR: MARCA' in header:
-        orientacao = 'MARCA_GRUPO'
-    else:
-        # fallback pelo formato mais novo, sem bloquear o usuário
-        orientacao = 'MARCA_GRUPO'
-
-    padrao_item = re.compile(
-        r'^(.*?)\s+(\d+)\s+([\d\.]+,\d{2})\s+([\d\.]+,\d{2})\s*$'
-    )
-
-    linhas = [' '.join(x.split()).strip() for x in texto.splitlines() if x.strip()]
-    official = collections.defaultdict(int)
-    groups = set()
-    brands = set()
-    cabecalho_atual = None
-
-    ignore_prefixes = (
-        'RESUMO DE ESTOQUE', 'RESUMO DE ESTOQUE DO GRUPO', 'EMPRESAS:',
-        'AGRUPADO POR:', 'DETALHADO POR:', 'EMITIR POR:',
-        'CONSIDERAR ESTOQUE:', 'EMITIR P.', 'DESCRIÇÃO', 'TOTAL P.',
-        '00 - CD', 'TIPO DO ESTOQUE:'
-    )
-
-    def eh_linha_sistema(s):
-        u = s.upper()
-        return u.startswith(ignore_prefixes) or u in {
-            'CD', 'CUSTO', 'VENDAESTOQUE', 'ESTOQUE', 'PROMO'
-        }
-
-    def limpa_cabecalho(s):
-        # remove : do relatório Grupo->Marca e sufixos de depósito L/N/PROMO
-        s = s.strip().rstrip(':').strip()
-        s = re.sub(r'\s+(L|N|PROMO)$', '', s, flags=re.I).strip()
-        return s
-
-    for linha in linhas:
-        up = linha.upper()
-        if eh_linha_sistema(linha):
-            continue
-        if up.startswith('SUBTOTAL') or re.match(r'^TOTAL\b', up):
-            continue
-
-        m = padrao_item.match(linha)
-        if m:
-            campo = m.group(1).strip()
-            qtd = int(m.group(2))
-            if not cabecalho_atual:
-                continue
-
-            if orientacao == 'GRUPO_MARCA':
-                grupo_raw = cabecalho_atual
-                marca_raw = campo
-            else:
-                marca_raw = cabecalho_atual
-                grupo_raw = campo
-
-            grupo = limpa_cabecalho(grupo_raw)
-            marca = limpa_cabecalho(marca_raw)
-            gnorm = normalizar_texto_analise(grupo)
-            mnorm = normalizar_texto_analise(marca)
-
-            if not gnorm or not mnorm:
-                continue
-            # Exclusão deliberadamente RESTRITA: somente sacolas e suprimentos.
-            if gnorm in {'SACOLA', 'SUPRIMENTO'}:
-                continue
-
-            official[(mnorm, gnorm)] += qtd
-            groups.add(grupo)
-            brands.add(marca)
-            continue
-
-        # Cabeçalho de grupo quando o PDF está GRUPO -> MARCA.
-        if orientacao == 'GRUPO_MARCA':
-            if linha.endswith(':') and not re.search(r'\d', linha):
-                cand = limpa_cabecalho(linha)
-                if cand and normalizar_texto_analise(cand) not in {'SACOLA', 'SUPRIMENTO'}:
-                    cabecalho_atual = cand
-                else:
-                    cabecalho_atual = cand
-            continue
-
-        # Cabeçalho de marca quando o PDF está MARCA -> GRUPO.
-        if not re.search(r'\d', linha) and len(linha) > 1:
-            cand = limpa_cabecalho(linha)
-            if cand and not eh_linha_sistema(cand):
-                cabecalho_atual = cand
-
-    # Em alguns PDFs antigos, o título vem em Grupo -> Marca mas pode haver
-    # espaços/linhas quebradas. O mapa acima continua correto porque só usa
-    # linhas numéricas sob o cabeçalho ativo.
-    official = dict(official)
-    total_oficial = int(sum(official.values()))
-    return official, sorted(groups), sorted(brands), total_oficial
-
-def classificar_grupo_analise(descricao, referencia, grupos):
-    """Classifica o grupo oficial do SofStore com regras determinísticas.
-    Usa descrição + referência; quando a descrição é genérica, códigos de
-    referência do próprio cadastro ajudam a separar subclasses.
-    """
-    texto = normalizar_texto_analise(f"{descricao} {referencia}")
-    tokens = set(texto.split())
-    grupos_norm = {normalizar_texto_analise(g): g for g in grupos}
-
-    def existe(nome):
-        return grupos_norm.get(normalizar_texto_analise(nome))
-
-    def gen():
-        if any(x in tokens for x in ('FEM','FEMIN','FEMININO')):
-            return 'FEMIN'
-        if any(x in tokens for x in ('MASC','MASCULINO')):
-            return 'MASC'
-        return None
-
-    genero = gen()
-
-    # Segmento de referência: no padrão xx.xxx.99.SEG.CODIGO
-    partes_ref = str(referencia or '').split('.')
-    seg4 = partes_ref[3] if len(partes_ref) >= 4 else ''
-
-    # Correções de grafia/comercial
-    if 'CAMSIETA' in tokens:
-        tokens.discard('CAMSIETA'); tokens.add('CAMISETA')
-    if 'T-SHIRT' in texto or 'TSHIRT' in texto:
-        tokens.add('CAMISETA')
-
-    # Regras de referência observadas nos cadastros do SofStore.
-    # CAMISA masculina: 35 = manga curta, 06 = manga longa.
-    if 'CAMISA' in tokens and genero == 'MASC':
-        if seg4 == '35' and existe('CAMISA MC MASC'):
-            return existe('CAMISA MC MASC')
-        if seg4 == '06' and existe('CAMISA ML MASC'):
-            return existe('CAMISA ML MASC')
-    # CAMISA feminina: 56/61 aparecem no cadastro de camisas femininas.
-    if 'CAMISA' in tokens and genero == 'FEMIN':
-        if seg4 in {'56','61'} and existe('CAMISA CHEMISE FEMIN'):
-            return existe('CAMISA CHEMISE FEMIN')
-
-    # SHORT / SHORTS: o SofStore não os usa como grupo separado.
-    # O segmento de referência separa os materiais masculinos.
-    if ('SHORT' in tokens or 'SHORTS' in tokens):
-        if genero == 'MASC':
-            mapa_m = {
-                '19': 'BERMUDA MOLETOM MASC',
-                '20': 'BERMUDA NYLON MASC',
-                '23': 'BERMUDA SARJA MASC',
-                '24': 'BERMUDA LINHO MASC',
-                '40': 'BERMUDA JEANS MASC',
-            }
-            alvo = mapa_m.get(seg4)
-            if alvo and existe(alvo):
-                return existe(alvo)
-        elif genero == 'FEMIN':
-            # Nos cadastros femininos, segmentos 51/75 aparecem junto de
-            # bermudas jeans; os demais casos ficam como tecido.
-            if seg4 in {'51','75','40'} and existe('BERMUDA JEANS FEMIN'):
-                return existe('BERMUDA JEANS FEMIN')
-            if existe('BERMUDA TECIDO FEMIN'):
-                return existe('BERMUDA TECIDO FEMIN')
-
-    # BERMUDA genérica: material explícito primeiro, depois segmento.
-    if 'BERMUDA' in tokens:
-        if 'JEANS' in tokens:
-            alvo = 'BERMUDA JEANS FEMIN' if genero == 'FEMIN' else 'BERMUDA JEANS MASC'
-        elif 'LINHO' in tokens:
-            alvo = 'BERMUDA LINHO MASC'
-        elif 'MOLETOM' in tokens:
-            alvo = 'BERMUDA MOLETOM MASC'
-        elif 'NYLON' in tokens:
-            alvo = 'BERMUDA NYLON MASC'
-        elif 'SARJA' in tokens:
-            alvo = 'BERMUDA SARJA MASC'
-        elif genero == 'FEMIN':
-            alvo = 'BERMUDA JEANS FEMIN' if seg4 in {'51','75','40'} else 'BERMUDA TECIDO FEMIN'
-        elif genero == 'MASC':
-            alvo = {
-                '19': 'BERMUDA MOLETOM MASC',
-                '20': 'BERMUDA NYLON MASC',
-                '23': 'BERMUDA SARJA MASC',
-                '24': 'BERMUDA LINHO MASC',
-                '40': 'BERMUDA JEANS MASC',
-            }.get(seg4)
-        else:
-            alvo = None
-        if alvo and existe(alvo):
-            return existe(alvo)
-
-    # Outras famílias oficiais de vestuário.
-    if 'SAIA' in tokens:
-        if 'JEANS' in tokens and existe('SAIA JEANS FEMIN'):
-            return existe('SAIA JEANS FEMIN')
-        if existe('SAIA TECIDO FEMIN'):
-            return existe('SAIA TECIDO FEMIN')
-    if 'BIQUINI' in tokens or 'MAIO' in tokens:
-        if existe('BIQUINI / MAIO FEMIN'):
-            return existe('BIQUINI / MAIO FEMIN')
-    if 'KIMONO' in tokens or ('SAIDA' in tokens and 'PRAIA' in tokens):
-        if existe('SAIDA PRAIA / QUIMONO FEMIN'):
-            return existe('SAIDA PRAIA / QUIMONO FEMIN')
-    if 'REGATAO' in tokens:
-        if existe('REGATA FEMIN') and genero == 'FEMIN':
-            return existe('REGATA FEMIN')
-        if existe('REGATA MASC') and genero == 'MASC':
-            return existe('REGATA MASC')
-    if 'CARDIGAN' in tokens or 'CACHEQUER' in tokens:
-        alvo = 'SUETER / TRICOT FEMIN' if genero == 'FEMIN' else 'SUETER / TRICOT MASC' if genero == 'MASC' else None
-        if alvo and existe(alvo):
-            return existe(alvo)
-    if 'CORSELET' in tokens:
-        if existe('TOP CROPPED FEMIN'):
-            return existe('TOP CROPPED FEMIN')
-    if 'LENCO' in tokens:
-        alvo = 'ACESSORIO FEMIN' if genero == 'FEMIN' else 'ACESSORIO MASC' if genero == 'MASC' else None
-        if alvo and existe(alvo):
-            return existe(alvo)
-
-    # Casos que são famílias claras no cadastro.
-    familias = []
-    if 'INFANTIL' in tokens:
-        familias.append('INFANTIL FEMIN' if genero == 'FEMIN' else 'INFANTIL MASC' if genero == 'MASC' else None)
-    if 'SUETER' in tokens or 'TRICOT' in tokens:
-        familias.append('SUETER / TRICOT FEMIN' if genero == 'FEMIN' else 'SUETER / TRICOT MASC' if genero == 'MASC' else None)
-    if 'TRIJUNTO' in tokens:
-        familias.append('CONJUNTO FEMIN' if genero == 'FEMIN' else 'CONJUNTO MASC' if genero == 'MASC' else None)
-    if 'PROMOCAO' in tokens or 'PROMOCIONAL' in tokens:
-        familias.append('PROMOCIONAL FEMIN' if genero == 'FEMIN' else 'PROMOCIONAL MASC' if genero == 'MASC' else None)
-    if 'BATA' in tokens:
-        familias.append('BLUSA FEMIN' if genero == 'FEMIN' else 'BLUSA MASC' if genero == 'MASC' else None)
-    if 'CHINELO' in tokens:
-        familias.append('CHINELO FEMIN' if genero == 'FEMIN' else 'CHINELO MASC' if genero == 'MASC' else None)
-    if 'SAPATENIS' in tokens or 'RASTEIRA' in tokens:
-        familias.append('CALÇADO FEMIN' if genero == 'FEMIN' else 'CALÇADO MASC' if genero == 'MASC' else None)
-    if 'GRAVATA' in tokens:
-        familias.append('GRAVATA MASC')
-    if 'CALCINHA' in tokens or 'SUTIA' in tokens or 'SUTIÃ' in texto:
-        familias.append('ROUPA INTIMA FEMIN')
-
-    for alvo in familias:
-        if alvo and existe(alvo):
-            return existe(alvo)
-
-    # Família principal.
-    familia = None
-    if 'CALCA' in tokens:
-        if 'JEANS' in tokens: familia = 'CALÇA JEANS FEMIN' if genero == 'FEMIN' else 'CALÇA JEANS MASC'
-        elif 'JOGGER' in tokens: familia = 'CALÇA JOGGER MASC'
-        elif 'MOLETOM' in tokens: familia = 'CALÇA MOLETOM FEMIN' if genero == 'FEMIN' else 'CALÇA MOLETOM MASC'
-        elif 'SARJA' in tokens: familia = 'CALÇA SARJA MASC'
-        elif genero: familia = f'CALÇA TECIDO {genero}'
-    elif 'BLUSA' in tokens:
-        familia = 'BLUSA INVERNO FEMIN' if ('INVERNO' in tokens and genero == 'FEMIN') else ('BLUSA FEMIN' if genero == 'FEMIN' else 'BLUSA MASC' if genero == 'MASC' else None)
-    elif 'CAMISETA' in tokens:
-        if genero == 'FEMIN': familia = 'CAMISETA FEMIN'
-        elif genero == 'MASC':
-            if seg4 == '92': familia = 'CAMISETA ML MASC'
-            elif seg4 in {'07','57','39'}: familia = 'CAMISETA MC MASC'
-    elif 'CAMISA' in tokens:
-        if 'CHEMISE' in tokens and genero == 'FEMIN': familia = 'CAMISA CHEMISE FEMIN'
-        elif genero == 'MASC': familia = 'CAMISA ML MASC' if seg4 == '06' else 'CAMISA MC MASC' if seg4 == '35' else None
-    elif 'REGATA' in tokens: familia = 'REGATA FEMIN' if genero == 'FEMIN' else 'REGATA MASC' if genero == 'MASC' else None
-    elif 'POLO' in tokens: familia = 'POLO FEMIN' if genero == 'FEMIN' else 'POLO MASC' if genero == 'MASC' else None
-    elif 'BLAZER' in tokens: familia = 'BLAZER FEMIN' if genero == 'FEMIN' else 'BLAZER MASC' if genero == 'MASC' else None
-    elif 'BODY' in tokens: familia = 'BODY FEMIN'
-    elif 'MACACAO' in tokens: familia = 'MACACAO FEMIN'
-    elif 'MACAQUINHO' in tokens: familia = 'MACAQUINHO FEMIN'
-    elif 'TOP' in tokens or 'CROPPED' in tokens: familia = 'TOP CROPPED FEMIN'
-    elif 'COLETE' in tokens: familia = 'COLETE FEMIN' if genero == 'FEMIN' else 'COLETE MASC' if genero == 'MASC' else None
-    elif 'CASACO' in tokens: familia = 'CASACO FEMIN' if genero == 'FEMIN' else 'CASACO MASC' if genero == 'MASC' else None
-    elif 'JAQUETA' in tokens: familia = 'JAQUETA FEMIN' if genero == 'FEMIN' else 'JAQUETA MASC' if genero == 'MASC' else None
-    elif 'CHINELO' in tokens: familia = 'CHINELO FEMIN' if genero == 'FEMIN' else 'CHINELO MASC' if genero == 'MASC' else None
-    elif 'MEIA' in tokens: familia = 'MEIA FEMIN' if genero == 'FEMIN' else 'MEIA MASC' if genero == 'MASC' else None
-    elif 'MOLETOM' in tokens: familia = 'MOLETOM FEMIN' if genero == 'FEMIN' else 'MOLETOM MASC' if genero == 'MASC' else None
-    elif 'PIJAMA' in tokens: familia = 'PIJAMA FEMIN' if genero == 'FEMIN' else 'PIJAMA MASC' if genero == 'MASC' else None
-    elif 'CONJUNTO' in tokens:
-        familia = 'CONJUNTO INVERNO FEMIN' if 'INVERNO' in tokens else ('CONJUNTO FEMIN' if genero == 'FEMIN' else 'CONJUNTO MASC' if genero == 'MASC' else None)
-    elif any(t in tokens for t in ('TENIS','SAPATO','SANDALIA','BOTA','CALCADO','SAPATENIS','RASTEIRA')):
-        familia = 'CALÇADO FEMIN' if genero == 'FEMIN' else 'CALÇADO MASC' if genero == 'MASC' else None
-    elif 'BOLSA' in tokens:
-        familia = 'BOLSA FEMIN' if genero == 'FEMIN' else 'MOCHILA / BOLSA MASC' if genero == 'MASC' else None
-    elif 'CINTO' in tokens: familia = 'CINTO FEMIN' if genero == 'FEMIN' else 'CINTO MASC' if genero == 'MASC' else None
-    elif 'OCULOS' in tokens: familia = 'OCULOS FEMIN' if genero == 'FEMIN' else 'OCULOS MASC' if genero == 'MASC' else None
-    elif 'CARTEIRA' in tokens: familia = 'CARTEIRA FEMIN' if genero == 'FEMIN' else 'CARTEIRA MASC' if genero == 'MASC' else None
-    elif 'CUECA' in tokens: familia = 'CUECA MASC'
-    elif 'LINGERIE' in tokens: familia = 'ROUPA INTIMA FEMIN'
-    elif 'MALETA' in tokens: familia = 'MALETA MASC'
-    elif 'GRAVATA' in tokens: familia = 'GRAVATA MASC'
-
-    if familia and existe(familia):
-        return existe(familia)
-
-    # Correspondência exata por tokens do nome oficial.
-    candidatos = []
-    for grupo in grupos:
-        ng = normalizar_texto_analise(grupo)
-        gt = [t for t in ng.split() if t not in {'FEMIN','MASC','UNICO','MASCULINO','FEMININO'}]
-        if not gt:
-            continue
-        overlap = sum(t in tokens for t in gt)
-        if overlap == len(gt):
-            score = 100 + len(gt) * 10
-            if genero and (('FEMIN' in ng and genero == 'FEMIN') or ('MASC' in ng and genero == 'MASC')):
-                score += 20
-            candidatos.append((score, len(gt), grupo))
-    if candidatos:
-        candidatos.sort(reverse=True)
-        if len(candidatos) == 1 or candidatos[0][:2] > candidatos[1][:2]:
-            return candidatos[0][2]
-
-    return None
-
-def classificar_marca_analise(descricao, referencia, marcas):
-    texto = normalizar_texto_analise(f"{descricao} {referencia}")
-    melhor = None
-    melhor_len = -1
-    for marca in marcas:
-        nm = normalizar_texto_analise(marca)
-        if nm and nm in texto and len(nm) > melhor_len:
-            melhor = marca
-            melhor_len = len(nm)
-    return melhor
-
-
-def encontrar_detalhamento_por_codigo(codigo, detalhamento):
-    """Tenta casar o barcode por código exato e, depois, pelo CÓD. PRODUTO embutido no barcode."""
-    info = detalhamento.get(codigo)
-    if info is not None:
-        return info
-
-    produto_map = detalhamento.get("__produto_map__", {})
-    candidatos = []
-    for codigo_produto, infos in produto_map.items():
-        if len(codigo_produto) >= 4 and codigo_produto in codigo:
-            # Um CÓD. PRODUTO pode aparecer em várias variantes; todas elas
-            # representam a mesma descrição/referência base para a análise de grupo.
-            candidatos.append((len(codigo_produto), codigo_produto, infos))
-
-    if not candidatos:
-        return None
-
-    maior_tamanho = max(x[0] for x in candidatos)
-    melhores = [x for x in candidatos if x[0] == maior_tamanho]
-    if len(melhores) != 1:
-        # Se houver mais de um código de produto de mesmo tamanho dentro do
-        # barcode, só aceitamos quando todas as descrições/referências coincidem.
-        assinaturas = set()
-        for _, _, infos in melhores:
-            for i in infos:
-                assinaturas.add((i.get("descricao", ""), i.get("referencia", "")))
-        if len(assinaturas) != 1:
-            return None
-
-    info_base = melhores[0][2][0].copy()
-    info_base["origem_match"] = "código do produto"
-    return info_base
-
-
-
-def construir_analise_rua1(estoque_total, estoque_rua1, detalhamento, grupos, marcas, mapa_oficial=None):
-    """Classificação/localização por código de barras.
-
-    A classificação do produto é feita pelo cadastro; a quantidade oficial por
-    grupo+marca vem exclusivamente do PDF do SofStore. O localizador só pode
-    consumir até o limite oficial de cada combinação.
-    """
-    mapa_oficial = mapa_oficial or {}
-    grupos_norm = grupos or []
-    marcas_norm = marcas or []
-
-    detalhes = []
-    pendente_sem_cadastro = 0
-    pendente_sem_grupo = 0
-    pendente_sem_marca = 0
-    recuperado = 0
-
-    # Primeiro passe: classifica cada código.
-    for codigo, quantidade_total in estoque_total.items():
-        qtd_total = float(quantidade_total)
-        qtd_r1 = min(float(estoque_rua1.get(codigo, 0)), qtd_total)
-
-        info = encontrar_detalhamento_por_codigo(codigo, detalhamento)
-        if info is None:
-            pendente_sem_cadastro += qtd_total
-            detalhes.append({
-                "codigo": codigo, "qtd": qtd_total, "r1": qtd_r1,
-                "grupo": None, "marca": None, "origem": "sem cadastro"
-            })
-            continue
-
-        if info.get("origem_match") == "código do produto":
-            recuperado += qtd_total
-
-        grupo = classificar_grupo_analise(
-            info.get("descricao", ""),
-            info.get("referencia", ""),
-            grupos_norm,
-        )
-        marca = classificar_marca_analise(
-            info.get("descricao", ""),
-            info.get("referencia", ""),
-            marcas_norm,
-        )
-
-        if not grupo:
-            pendente_sem_grupo += qtd_total
-        if not marca:
-            pendente_sem_marca += qtd_total
-
-        detalhes.append({
-            "codigo": codigo, "qtd": qtd_total, "r1": qtd_r1,
-            "grupo": normalizar_texto_analise(grupo) if grupo else None,
-            "marca": normalizar_texto_analise(marca) if marca else None,
-            "origem": info.get("origem_match", "exato"),
-        })
-
-    # Segundo passe: consome os limites oficiais, priorizando Rua 1.
-    consumido = collections.defaultdict(float)
-    linhas = []
-    conflito = 0.0
-
-    # Ordem: Rua 1 primeiro para garantir que toda peça reconhecida da Rua 1
-    # seja priorizada na reconciliação.
-    detalhes.sort(key=lambda x: (-x["r1"], -x["qtd"]))
-
-    for d in detalhes:
-        if not d["grupo"] or not d["marca"]:
-            continue
-
-        chave = (d["marca"], d["grupo"])
-        limite = float(mapa_oficial.get(chave, 0))
-        usado = consumido[chave]
-        saldo = max(limite - usado, 0.0)
-
-        r1_confirmado = min(d["r1"], saldo)
-        saldo -= r1_confirmado
-
-        outras_qtd = max(d["qtd"] - d["r1"], 0.0)
-        outras_confirmado = min(outras_qtd, saldo)
-
-        confirmado = r1_confirmado + outras_confirmado
-        consumido[chave] += confirmado
-
-        excesso = max(d["qtd"] - confirmado, 0.0)
-        conflito += excesso
-
-        if confirmado > 0:
-            linhas.append({
-                "Grupo": d["grupo"],
-                "Marca": d["marca"],
-                "Oficial SofStore": limite,
-                "Localizado": confirmado,
-                "Rua 1": r1_confirmado,
-                "Outras Ruas": outras_confirmado,
-                "Não localizado": max(limite - consumido[chave], 0.0),
-            })
-
-    # Consolida por grupo+marca. A coluna Oficial é independente do localizador.
-    if linhas:
-        df = pd.DataFrame(linhas)
-        df = (
-            df.groupby(["Grupo", "Marca"], as_index=False)[
-                ["Oficial SofStore", "Localizado", "Rua 1", "Outras Ruas"]
-            ].max()
-        )
-        # Depois de agrupar, reconstruímos localizado pela soma segura.
-        soma_loc = pd.DataFrame(linhas).groupby(["Grupo","Marca"], as_index=False)[
-            ["Localizado","Rua 1","Outras Ruas"]
-        ].sum()
-        df = df.drop(columns=["Localizado","Rua 1","Outras Ruas"]).merge(
-            soma_loc, on=["Grupo","Marca"], how="left"
-        )
-        df["Não localizado"] = (
-            df["Oficial SofStore"] - df["Localizado"]
-        ).clip(lower=0)
-        df["% Rua 1"] = np.where(
-            df["Oficial SofStore"] > 0,
-            df["Rua 1"] / df["Oficial SofStore"] * 100,
-            0
-        )
-        df = df.sort_values(["Grupo","Marca"]).reset_index(drop=True)
-    else:
-        df = pd.DataFrame(columns=[
-            "Grupo","Marca","Oficial SofStore","Localizado",
-            "Rua 1","Outras Ruas","Não localizado","% Rua 1"
-        ])
-
-    total_localizado = float(sum(estoque_total.values()))
-    total_r1 = float(min(sum(estoque_rua1.values()), total_localizado))
-    total_oficial = float(sum(mapa_oficial.values()))
-    total_confirmado = float(df["Localizado"].sum()) if not df.empty else 0.0
-    total_sem_classificacao = max(total_localizado - total_confirmado, 0.0)
-    total_nao_localizado = max(total_oficial - total_confirmado - total_sem_classificacao, 0.0)
-
-    meta = {
-        "local_total": total_localizado,
-        "local_r1": total_r1,
-        "local_outros": max(total_localizado-total_r1,0),
-        "oficial_total": total_oficial,
-        "confirmado": total_confirmado,
-        "sem_classificacao": total_sem_classificacao,
-        "nao_localizado": total_nao_localizado,
-        "conflito": conflito,
-        "sem_cadastro": pendente_sem_cadastro,
-        "sem_grupo": pendente_sem_grupo,
-        "sem_marca": pendente_sem_marca,
-        "recuperado_produto": recuperado,
-        "fechamento_ok": abs(total_oficial - (
-            total_confirmado + total_sem_classificacao + total_nao_localizado
-        )) < 0.01,
-    }
-    return df, meta
-
-
-# ==========================================
 # RELATÓRIO DE ESTOQUE IMPORTADO (HISTÓRICO DE IMPORTAÇÕES)
 # ==========================================
 def salvar_relatorio_no_banco(grupos, nome_arquivo, importado_por):
@@ -1979,18 +928,38 @@ def resolver_chave_por_endereco(rua_num, nivel, coluna):
 
     return chave, None
 
-# Carrega as configurações persistidas antes de montar o estado inicial do CD.
-if "configuracoes_cd_carregadas" not in st.session_state:
-    st.session_state.configuracoes_cd_carregadas = bool(carregar_configuracoes_do_banco())
+# =========================================================
+# FONTE DE VERDADE DA ESTRUTURA FÍSICA
+# =========================================================
+ESTRUTURA_CD_DO_BANCO = carregar_estrutura_cd_do_banco()
+if ESTRUTURA_CD_DO_BANCO:
+    ESTRUTURA_CD = ESTRUTURA_CD_DO_BANCO
+else:
+    # Fallback de emergência somente se o Supabase estiver indisponível.
+    ESTRUTURA_CD = ESTRUTURA_CD_PADRAO.copy()
+    st.warning(
+        "⚠️ Estrutura do CD não pôde ser carregada do Supabase. "
+        "O visualizador está usando o cadastro local apenas como fallback."
+    )
 
-# Inicialização do Estado
-if 'base_dados_cd' not in st.session_state:
+def reconstruir_base_dados_cd():
+    """Reconstrói a malha de casulos usando a estrutura atual do Supabase.
+
+    O estoque salvo no banco é reaplicado apenas para chaves que continuam
+    existindo na estrutura atual. Assim, uma alteração estrutural realmente
+    muda o Visualizador na próxima execução do app.
+    """
     estoque_persistido = carregar_estoque_do_banco()
-    st.session_state.base_dados_cd = {}
+    base = {}
+
     for r_nome, r_cfg in ESTRUTURA_CD.items():
         if r_cfg.get("tipo") == "Inexistente":
             continue
-        lista_lados = [("impar", r_cfg.get("cols_impar", [])), ("par", r_cfg.get("cols_par", []))]
+
+        lista_lados = [
+            ("impar", r_cfg.get("cols_impar", [])),
+            ("par", r_cfg.get("cols_par", [])),
+        ]
         if "cols_seq" in r_cfg:
             lista_lados = [("seq", r_cfg["cols_seq"])]
 
@@ -2000,13 +969,16 @@ if 'base_dados_cd' not in st.session_state:
                 spec = obter_especificacao_casulo(r_nome, c, l_param)
                 for n in spec["niveis"]:
                     chave_casulo = obter_chave_casulo(r_nome, lado, c, n)
-                    if estoque_persistido and chave_casulo in estoque_persistido:
-                        st.session_state.base_dados_cd[chave_casulo] = estoque_persistido[chave_casulo]
-                    else:
-                        st.session_state.base_dados_cd[chave_casulo] = {}
+                    base[chave_casulo] = dict((estoque_persistido or {}).get(chave_casulo, {}))
+
+    return base
+
+# Rebuilda sempre a malha a partir da estrutura atual. As operações de estoque
+# já são persistidas no Supabase, então não perdemos dados salvos ao reexecutar.
+st.session_state.base_dados_cd = reconstruir_base_dados_cd()
 
 if 'banco_dados_conectado' not in st.session_state:
-    st.session_state.banco_dados_conectado = testar_conexao_bd()
+    st.session_state.banco_dados_conectado = obter_conexao_bd() is not None
 if 'ultimo_erro_bd' not in st.session_state:
     st.session_state.ultimo_erro_bd = None
 
@@ -2275,224 +1247,6 @@ if not st.session_state.autenticado:
 
     st.stop()
 
-
-
-# ==========================================
-# SGO — VISÃO SIMPLIFICADA DE ENTRADAS
-# ==========================================
-STATUS_SGO_ORDEM = ["🧵 Aviamento","🚚 Em Trânsito","🏭 Processamento","📦 Em Estocagem","🔎 Qualidade","✅ Concluído"]
-
-def _sgo_fase(status):
-    sl = str(status or "").strip().lower()
-    # Rejeitados saem do fluxo operacional: serão devolvidos ao fornecedor.
-    if "rejeitado" in sl:
-        return "⛔ Rejeitado"
-    # Retrabalho continua dentro da fila da Qualidade.
-    if "retrabalho" in sl:
-        return "🔎 Qualidade"
-    if "inspe" in sl or "qualidade" in sl:
-        return "🔎 Qualidade"
-    if "aviamento" in sl: return "🧵 Aviamento"
-    if "trânsito" in sl or "transito" in sl: return "🚚 Em Trânsito"
-    if "estocagem" in sl: return "📦 Em Estocagem"
-    if "aguardando processamento" in sl or "processamento" in sl: return "🏭 Processamento"
-    if "aguardando envio" in sl or "envio" in sl: return "🚚 Em Trânsito"
-    if "conclu" in sl: return "✅ Concluído"
-    return str(status or "⚪ Sem status").strip() or "⚪ Sem status"
-
-def _normalizar_sgo(df):
-    df = df.copy()
-    cols = set(df.columns)
-    out = pd.DataFrame()
-    if {"Grupo/Categoria","SKU","Quantidade","Status (Kanban)"}.issubset(cols):
-        out["ID"] = df.get("Lote", pd.Series(df.index.astype(str), index=df.index)).astype(str)
-        out["Grupo"] = df["Grupo/Categoria"].astype(str)
-        out["SKU"] = df["SKU"].astype(str)
-        out["Descrição"] = df.get("Descrição", pd.Series("", index=df.index)).astype(str)
-        out["Fornecedor"] = df.get("Fornecedor", pd.Series("", index=df.index)).astype(str)
-        out["Quantidade"] = pd.to_numeric(df["Quantidade"], errors="coerce").fillna(0).astype(int)
-        out["StatusOriginal"] = df["Status (Kanban)"].astype(str)
-        out["Fase"] = out["StatusOriginal"].map(_sgo_fase)
-        out["Data"] = pd.to_datetime(df.get("Data Esperada"), errors="coerce", dayfirst=True)
-        out["DataChegada"] = pd.to_datetime(df.get("Data Chegada"), errors="coerce", dayfirst=True)
-        out["Lote"] = df.get("Lote", out["ID"]).astype(str).str.replace(r"\.0$","",regex=True)
-        out["Origem"] = "Fluxo SGO"
-        return out
-    if {"ID Compra","Fornecedor","Status Compra","Data Entrega Prevista","Qtd Itens","Grupo"}.issubset(cols):
-        out["ID"] = df["ID Compra"].astype(str)
-        out["Grupo"] = df["Grupo"].astype(str)
-        out["SKU"] = df.get("SKU", pd.Series("", index=df.index)).astype(str)
-        out["Descrição"] = df.get("Produto", pd.Series("", index=df.index)).astype(str)
-        out["Fornecedor"] = df["Fornecedor"].astype(str)
-        qtd_src = df["Qtd Esperada"] if "Qtd Esperada" in cols else df["Qtd Itens"]
-        out["Quantidade"] = pd.to_numeric(qtd_src, errors="coerce").fillna(0).astype(int)
-        # Para o relatório de Compras, a situação da Qualidade vem dos campos
-        # próprios do SGO; não inferimos "Qualidade" de um status genérico.
-        status_compra = df["Status Compra"].fillna("").astype(str)
-        status_kanban = df["Status Kanban"].fillna("").astype(str) if "Status Kanban" in cols else pd.Series("", index=df.index)
-        status_lote = df["Status Lote"].fillna("").astype(str) if "Status Lote" in cols else pd.Series("", index=df.index)
-        status_qual = df["Status Qualidade"].fillna("").astype(str) if "Status Qualidade" in cols else pd.Series("", index=df.index)
-        fase_insp = df["Fase Inspeção"].fillna("").astype(str) if "Fase Inspeção" in cols else pd.Series("", index=df.index)
-        conclusao_q = df["Conclusão Qualidade"].fillna("").astype(str) if "Conclusão Qualidade" in cols else pd.Series("", index=df.index)
-        raw = status_kanban.where(status_kanban.str.strip().ne(""), status_compra)
-        out["StatusOriginal"] = raw
-        fase = raw.map(_sgo_fase)
-        rejeitado = status_qual.str.contains("rejeit", case=False, na=False) | status_lote.str.contains("rejeit", case=False, na=False)
-        em_qualidade = (fase_insp.str.strip().ne("") | conclusao_q.str.strip().ne("")) & ~status_qual.str.contains("aprov", case=False, na=False)
-        retrabalho = status_qual.str.contains("retrabalho", case=False, na=False)
-        aprovado = status_qual.str.contains("aprov", case=False, na=False) & conclusao_q.str.strip().ne("")
-        fase = fase.mask(rejeitado, "⛔ Rejeitado")
-        fase = fase.mask((em_qualidade | retrabalho) & ~rejeitado & ~aprovado, "🔎 Qualidade")
-        out["Fase"] = fase
-        out["Data"] = pd.to_datetime(df["Data Entrega Prevista"], errors="coerce")
-        if "Data Esperada" in cols:
-            d2 = pd.to_datetime(df["Data Esperada"], errors="coerce", dayfirst=True)
-            out["Data"] = d2.fillna(out["Data"])
-        out["DataChegada"] = pd.to_datetime(df.get("Data Recebimento Real", pd.Series(pd.NaT,index=df.index)), errors="coerce")
-        out["Lote"] = df.get("Lote", df["ID Compra"]).astype(str).str.replace(r"\.0$","",regex=True)
-        out["Origem"] = "Compras / SGO"
-        return out
-    raise ValueError("Este arquivo não parece ser um relatório SGO compatível.")
-
-def carregar_relatorio_sgo(uploaded_file):
-    if uploaded_file is None: return None
-    return _normalizar_sgo(pd.read_excel(uploaded_file, sheet_name=0))
-
-
-def salvar_relatorio_sgo_supabase(df_sgo, nome_arquivo):
-    """Salva uma importação completa do SGO no Supabase."""
-    conn = obter_conexao_bd()
-    if conn is None:
-        return False, st.session_state.get("ultimo_erro_bd", "Banco não disponível.")
-
-    try:
-        agora = pd.Timestamp.now(tz="UTC")
-        usuario = st.session_state.get("usuario_atual", "")
-        with conn.cursor() as cur:
-            cur.execute(
-                """INSERT INTO public.sgo_relatorios
-                   (nome_arquivo, importado_em, importado_por, quantidade_registros, ativo)
-                   VALUES (%s, %s, %s, %s, TRUE)
-                   RETURNING id""",
-                (nome_arquivo, agora.to_pydatetime(), str(usuario), int(len(df_sgo)))
-            )
-            relatorio_id = cur.fetchone()[0]
-
-            linhas = []
-            for _, r in df_sgo.iterrows():
-                data_prevista = r.get("Data")
-                data_chegada = r.get("DataChegada")
-                if pd.isna(data_prevista):
-                    data_prevista = None
-                else:
-                    data_prevista = pd.Timestamp(data_prevista).date()
-                if pd.isna(data_chegada):
-                    data_chegada = None
-                else:
-                    data_chegada = pd.Timestamp(data_chegada).date()
-
-                linhas.append((
-                    relatorio_id,
-                    str(r.get("Lote", "")),
-                    str(r.get("Grupo", "")),
-                    str(r.get("SKU", "")),
-                    str(r.get("Descrição", "")),
-                    str(r.get("Fornecedor", "")),
-                    int(r.get("Quantidade", 0) or 0),
-                    str(r.get("StatusOriginal", "")),
-                    str(r.get("Fase", "")),
-                    data_prevista,
-                    data_chegada,
-                    str(r.get("Origem", "")),
-                ))
-
-            if linhas:
-                execute_values(
-                    cur,
-                    """INSERT INTO public.sgo_lotes
-                    (relatorio_id, lote, grupo, sku, descricao, fornecedor, quantidade,
-                     status_original, fase, data_prevista, data_chegada, origem)
-                    VALUES %s""",
-                    linhas,
-                    page_size=500,
-                )
-
-        conn.commit()
-        conn.close()
-        return True, None
-    except Exception as e:
-        try:
-            conn.rollback()
-            conn.close()
-        except Exception:
-            pass
-        return False, str(e)
-
-
-def carregar_ultimo_relatorio_sgo_supabase():
-    """Carrega o último relatório SGO persistido no Supabase."""
-    conn = obter_conexao_bd()
-    if conn is None:
-        return None, None
-
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """SELECT id, nome_arquivo
-                   FROM public.sgo_relatorios
-                   ORDER BY importado_em DESC, id DESC
-                   LIMIT 1"""
-            )
-            meta = cur.fetchone()
-            if not meta:
-                conn.close()
-                return None, None
-
-            relatorio_id, nome_arquivo = meta
-            cur.execute(
-                """SELECT lote, grupo, sku, descricao, fornecedor, quantidade,
-                          status_original, fase, data_prevista, data_chegada, origem
-                   FROM public.sgo_lotes
-                   WHERE relatorio_id = %s
-                   ORDER BY data_prevista DESC NULLS LAST, id DESC""",
-                (relatorio_id,)
-            )
-            rows = cur.fetchall()
-
-        conn.close()
-
-        cols = [
-            "Lote", "Grupo", "SKU", "Descrição", "Fornecedor", "Quantidade",
-            "StatusOriginal", "Fase", "Data", "DataChegada", "Origem"
-        ]
-        df = pd.DataFrame(rows, columns=cols)
-        df["Quantidade"] = pd.to_numeric(df["Quantidade"], errors="coerce").fillna(0).astype(int)
-        df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
-        df["DataChegada"] = pd.to_datetime(df["DataChegada"], errors="coerce")
-        for c in ["Lote", "Grupo", "SKU", "Descrição", "Fornecedor", "StatusOriginal", "Fase", "Origem"]:
-            df[c] = df[c].fillna("").astype(str)
-        return df, nome_arquivo
-    except Exception as e:
-        try:
-            conn.close()
-        except Exception:
-            pass
-        st.session_state.ultimo_erro_bd = str(e)
-        return None, None
-
-def _sgo_card(titulo, valor, subtitulo="", cor="#ffcc00"):
-    st.markdown(f"""<div style="background:#11161d;border:1px solid #283845;border-radius:12px;padding:14px 16px;min-height:100px;">
-    <div style="color:#8892b0;font-size:11px;text-transform:uppercase;letter-spacing:1px;">{titulo}</div>
-    <div style="font-size:29px;font-weight:900;color:{cor};margin-top:7px;">{valor:,}</div>
-    <div style="color:#9aa6b2;font-size:11px;margin-top:4px;">{subtitulo}</div></div>""", unsafe_allow_html=True)
-
-def _sgo_horizonte(data):
-    if pd.isna(data): return "Sem data"
-    delta=(pd.Timestamp(data).normalize()-pd.Timestamp.today().normalize()).days
-    if delta < 0: return "Atrasado"
-    if delta <= 7: return "Até 7 dias"
-    if delta <= 30: return "8–30 dias"
-    return ">30 dias"
 # SIDEBAR: NAVEGAÇÃO
 st.sidebar.markdown(f"""
 <div style='text-align:center; padding: 8px 0 14px 0;'>
@@ -2509,9 +1263,7 @@ opcoes_telas = [
     "📊 Estatísticas de Casulos",
     "🧪 Simulador de Capacidade",
     "📄 Importar Relatório de Estoque",
-    "📥 Entrada de Dados / Abastecimento",
-    "📊 Análise Rua 1 por Grupo",
-    "🚚 SGO — Próximas Entradas"
+    "📥 Entrada de Dados / Abastecimento"
 ]
 if st.session_state.papel_atual == "gerente":
     opcoes_telas.append("🛠️ Gerenciador (Admin)")
@@ -3219,148 +1971,6 @@ elif st.session_state.aba_ativa_selecionada == "🚚 Expedição (Teste)":
 
 
 # ==========================================
-# TELA 3.4.5: ANÁLISE DE ESTOQUE POR GRUPO / MARCA / RUA 1
-elif st.session_state.aba_ativa_selecionada == "📊 Análise Rua 1 por Grupo":
-    st.markdown("<h3 style='text-align: center; color: #ffcc00;'>📊 Análise de Estoque — Rua 1 x Demais Ruas</h3>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align:center; color:#8892b0;'>Mantém o visual por Grupo × Marca e reconcilia o estoque físico com o estoque oficial do SofStore.</p>", unsafe_allow_html=True)
-
-    col_a1, col_a2, col_a3, col_a4 = st.columns(4)
-    with col_a1:
-        arquivo_todas = st.file_uploader("📦 CSV — Todas as Ruas", type=["csv"], key="analise_todas_ruas")
-    with col_a2:
-        arquivo_r1 = st.file_uploader("1️⃣ CSV — Rua 1", type=["csv"], key="analise_rua1")
-    with col_a3:
-        arquivo_detalhe = st.file_uploader("🔎 XLSX — Detalhamento", type=["xlsx"], key="analise_detalhe")
-    with col_a4:
-        arquivo_grupos = st.file_uploader("📋 PDF — Grupo x Marca", type=["pdf"], key="analise_pdf_grupos")
-
-    if arquivo_todas and arquivo_r1 and arquivo_detalhe:
-        try:
-            estoque_total = ler_csv_estoque_upload(arquivo_todas)
-            estoque_r1 = ler_csv_estoque_upload(arquivo_r1)
-            detalhamento = ler_detalhamento_xlsx_upload(arquivo_detalhe)
-
-            mapa_oficial, grupos_oficiais, marcas_oficiais, total_oficial = (
-                extrair_mapa_oficial_grupo_marca_pdf(arquivo_grupos)
-                if arquivo_grupos else ({}, [], [], 0)
-            )
-
-            if not mapa_oficial:
-                st.error("📋 O PDF oficial não trouxe linhas Grupo × Marca reconhecíveis. Use o relatório Grupo × Marca do SofStore. A tela aceita os formatos 'Agrupado por: GRUPO / Detalhado por: MARCA' e 'Agrupado por: MARCA / Detalhado por: GRUPO'.")
-            else:
-                df_analise, meta = construir_analise_rua1(
-                    estoque_total,
-                    estoque_r1,
-                    detalhamento,
-                    grupos_oficiais,
-                    marcas_oficiais,
-                    mapa_oficial,
-                )
-
-                total_local = meta["local_total"]
-                total_r1 = meta["local_r1"]
-                total_outros = meta["local_outros"]
-                oficial = meta["oficial_total"]
-
-                k1, k2, k3, k4 = st.columns(4)
-                k1.metric("🎯 Estoque oficial", f"{oficial:,.0f}")
-                k2.metric("📍 Localizado nas ruas", f"{total_local:,.0f}")
-                k3.metric("1️⃣ Rua 1", f"{total_r1:,.0f}")
-                k4.metric("📌 Outras ruas", f"{total_outros:,.0f}")
-
-                k5, k6, k7, k8 = st.columns(4)
-                k5.metric("🔍 Não localizado", f"{meta['nao_localizado']:,.0f}")
-                k6.metric("⚠️ Sem classificação", f"{meta['sem_classificacao']:,.0f}")
-                k7.metric("⚠️ Conflito de classificação", f"{meta['conflito']:,.0f}")
-                k8.metric("✅ Fechamento", "OK" if meta["fechamento_ok"] else "REVISAR")
-
-                if meta["fechamento_ok"]:
-                    st.success(
-                        f"✅ Fechamento oficial: {oficial:,.0f} = "
-                        f"{meta['confirmado']:,.0f} confirmadas + "
-                        f"{meta['sem_classificacao']:,.0f} sem classificação + "
-                        f"{meta['nao_localizado']:,.0f} não localizado."
-                    )
-                else:
-                    st.error("❌ O fechamento não bateu. O sistema bloqueou a apresentação de um total artificial.")
-
-                if total_local > oficial:
-                    st.error(
-                        f"⚠️ Os arquivos de ruas trazem {total_local:,.0f} peças, "
-                        f"acima do estoque oficial de {oficial:,.0f}. O excesso não é tratado como estoque válido."
-                    )
-
-                if df_analise.empty:
-                    st.warning("Nenhum Grupo × Marca pôde ser confirmado.")
-                else:
-                    grupos = sorted(df_analise["Grupo"].unique().tolist())
-                    marcas = sorted(df_analise["Marca"].unique().tolist())
-
-                    f1, f2 = st.columns(2)
-                    with f1:
-                        grupo_filtro = st.selectbox(
-                            "Filtrar por grupo",
-                            ["Todos"] + grupos,
-                            key="filtro_analise_grupo"
-                        )
-                    with f2:
-                        marca_filtro = st.selectbox(
-                            "Filtrar por marca",
-                            ["Todas"] + marcas,
-                            key="filtro_analise_marca"
-                        )
-
-                    df_view = df_analise.copy()
-                    if grupo_filtro != "Todos":
-                        df_view = df_view[df_view["Grupo"] == grupo_filtro]
-                    if marca_filtro != "Todas":
-                        df_view = df_view[df_view["Marca"] == marca_filtro]
-
-                    st.markdown("#### 📋 Estoque oficial × localização")
-                    st.dataframe(
-                        df_view.style.format({
-                            "Oficial SofStore": "{:,.0f}",
-                            "Localizado": "{:,.0f}",
-                            "Rua 1": "{:,.0f}",
-                            "Outras Ruas": "{:,.0f}",
-                            "Não localizado": "{:,.0f}",
-                            "% Rua 1": "{:.1f}%"
-                        }),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-
-                    st.markdown("#### 📊 Rua 1 × Outras ruas")
-                    if not df_view.empty:
-                        resumo_grupo = (
-                            df_view.groupby("Grupo", as_index=False)[
-                                ["Rua 1", "Outras Ruas"]
-                            ].sum().sort_values("Rua 1", ascending=False)
-                        )
-                        st.bar_chart(resumo_grupo.set_index("Grupo")[["Rua 1", "Outras Ruas"]])
-
-                    with st.expander("🔎 Auditoria de classificação"):
-                        st.write(
-                            f"Recuperados pelo vínculo de CÓD. PRODUTO: "
-                            f"{meta['recuperado_produto']:,.0f} peças."
-                        )
-                        st.write(
-                            f"Sem cadastro no detalhamento: {meta['sem_cadastro']:,.0f} peças."
-                        )
-                        st.write(
-                            f"Sem grupo: {meta['sem_grupo']:,.0f} peças."
-                        )
-                        st.write(
-                            f"Sem marca: {meta['sem_marca']:,.0f} peças."
-                        )
-
-        except Exception as e:
-            st.error(f"Não foi possível processar os arquivos: {e}")
-
-    else:
-        st.info("Envie os quatro arquivos para gerar a reconciliação: Todas as Ruas, Rua 1, Detalhamento e o PDF oficial Grupo x Marca.")
-
-# ==========================================
 # TELA 3.5: ESTATÍSTICAS DE CASULOS (RAIO-X DA ESTRUTURA)
 # ==========================================
 elif st.session_state.aba_ativa_selecionada == "📊 Estatísticas de Casulos":
@@ -3821,106 +2431,6 @@ elif st.session_state.aba_ativa_selecionada == "📥 Entrada de Dados / Abasteci
 # ==========================================
 # TELA 5: GERENCIADOR (ADMIN)
 # ==========================================
-
-elif st.session_state.aba_ativa_selecionada == "🚚 SGO — Próximas Entradas":
-    st.markdown("<h3 style='text-align:center;color:#ffcc00;'>🚚 SGO — Próximas Entradas</h3>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align:center;color:#8892b0;'>Veja primeiro o que importa: quanto vem, quando chega e em que etapa está.</p>", unsafe_allow_html=True)
-
-    arquivo_sgo = st.file_uploader("📄 Relatório do SGO (.xlsx)", type=["xlsx"], key="upload_sgo_lotes")
-    if arquivo_sgo is not None:
-        try:
-            df_sgo_novo = carregar_relatorio_sgo(arquivo_sgo)
-            salvou, erro_bd = salvar_relatorio_sgo_supabase(df_sgo_novo, arquivo_sgo.name)
-
-            if salvou:
-                st.session_state.sgo_relatorio_df = df_sgo_novo
-                st.session_state.sgo_relatorio_nome = arquivo_sgo.name
-                st.success("✅ Relatório do SGO salvo no Supabase. Ele continuará disponível mesmo após reiniciar o app.")
-            else:
-                # Mantém a importação funcional nesta sessão, sem perder o relatório
-                # apenas porque o banco não está acessível.
-                st.session_state.sgo_relatorio_df = df_sgo_novo
-                st.session_state.sgo_relatorio_nome = arquivo_sgo.name
-                st.warning(f"⚠️ Relatório carregado nesta sessão, mas não foi salvo no Supabase: {erro_bd}")
-        except Exception as e:
-            st.error(f"⚠️ Não consegui processar o relatório: {e}")
-            st.stop()
-
-    df_sgo = st.session_state.get("sgo_relatorio_df")
-    if df_sgo is None:
-        df_sgo, nome_sgo = carregar_ultimo_relatorio_sgo_supabase()
-        if df_sgo is not None:
-            st.session_state.sgo_relatorio_df = df_sgo
-            st.session_state.sgo_relatorio_nome = nome_sgo
-
-    if df_sgo is None:
-        st.info("📄 Envie o relatório do SGO para começar.\n\nSe já existir uma importação salva, o OutLog carregará automaticamente o último relatório do Supabase.")
-        st.stop()
-
-    # Rejeitados não entram no fluxo operacional: serão devolvidos ao fornecedor.
-    # Concluídos também saem da fila.
-    aberto=df_sgo[~df_sgo["Fase"].isin(["✅ Concluído","⛔ Rejeitado"])].copy()
-    if aberto.empty: aberto=df_sgo.copy()
-    aberto["Horizonte"]=aberto["Data"].map(_sgo_horizonte)
-    total=int(aberto["Quantidade"].sum())
-    ate7=int(aberto.loc[aberto["Horizonte"]=="Até 7 dias","Quantidade"].sum())
-    atrasado=int(aberto.loc[aberto["Horizonte"]=="Atrasado","Quantidade"].sum())
-    transito=int(aberto.loc[aberto["Fase"]=="🚚 Em Trânsito","Quantidade"].sum())
-
-    qualidade=int(df_sgo.loc[df_sgo["Fase"]=="🔎 Qualidade","Quantidade"].sum())
-    c1,c2,c3,c4=st.columns(4)
-    with c1: _sgo_card("Total em aberto",total,f"{len(aberto):,} registros","#ffcc00")
-    with c2: _sgo_card("Próximos 7 dias",ate7,"prioridade","#45a29e")
-    with c3: _sgo_card("Atrasados",atrasado,"precisam de atenção","#e74c3c")
-    with c4: _sgo_card("🔎 Qualidade",qualidade,"inspeção / retrabalho","#c77dff")
-
-    st.markdown("### 🧭 Onde está agora?")
-    ordem=["🧵 Aviamento","🚚 Em Trânsito","🏭 Processamento","📦 Em Estocagem","🔎 Qualidade","✅ Concluído"]
-    cols=st.columns(len(ordem))
-    for i,fase in enumerate(ordem):
-        sub=df_sgo[df_sgo["Fase"]==fase]
-        qtd=int(sub["Quantidade"].sum())
-        with cols[i]:
-            st.markdown(f"""<div style='background:#11161d;border:1px solid #283845;border-radius:10px;padding:10px;text-align:center;min-height:86px;'>
-            <div style='font-size:11px;color:#b7c0c8;font-weight:700'>{fase}</div>
-            <div style='font-size:22px;font-weight:900;color:#ffcc00;margin-top:5px'>{qtd:,}</div>
-            <div style='font-size:10px;color:#6f7b86'>{len(sub):,} registros</div></div>""",unsafe_allow_html=True)
-
-    rejeitados=int(df_sgo.loc[df_sgo["Fase"]=="⛔ Rejeitado","Quantidade"].sum())
-    if rejeitados:
-        st.caption(f"⛔ {rejeitados:,} peças rejeitadas foram retiradas do fluxo operacional e não entram no total em aberto.")
-
-    st.markdown("### 🔥 Próximos que merecem atenção")
-    # Visualização cronológica: mais novo → mais velho. Registros sem data ficam por último.
-    prioridade=aberto.sort_values(["Data"], ascending=[False], na_position="last").head(8)
-    if not prioridade.empty:
-        ex=prioridade[["Data","Grupo","Fornecedor","Quantidade","Fase","Lote"]].copy()
-        ex["Data"]=ex["Data"].dt.strftime("%d/%m/%Y")
-        ex=ex.rename(columns={"Data":"Chegada","Quantidade":"Peças","Fase":"Etapa","Lote":"Lote"})
-        st.dataframe(ex,use_container_width=True,hide_index=True,height=285)
-
-    with st.expander("🔎 Filtrar e ver todos os registros"):
-        f1,f2,f3=st.columns(3)
-        with f1: ff=st.multiselect("Etapa",sorted(aberto["Fase"].dropna().unique()),key="sgo3_fase")
-        with f2: fg=st.multiselect("Grupo",sorted(aberto["Grupo"].dropna().unique()),key="sgo3_grupo")
-        with f3: fo=st.multiselect("Fornecedor",sorted(aberto["Fornecedor"].dropna().unique()),key="sgo3_for")
-        busca=st.text_input("Buscar por lote, SKU ou descrição",key="sgo3_busca")
-        view=aberto.copy()
-        if ff: view=view[view["Fase"].isin(ff)]
-        if fg: view=view[view["Grupo"].isin(fg)]
-        if fo: view=view[view["Fornecedor"].isin(fo)]
-        if busca.strip():
-            b=busca.strip().lower()
-            m=(view["Lote"].str.lower().str.contains(b,na=False)|view["SKU"].str.lower().str.contains(b,na=False)|view["Descrição"].str.lower().str.contains(b,na=False))
-            view=view[m]
-        # Lista completa também segue da data mais nova para a mais antiga.
-        view=view.sort_values("Data", ascending=False, na_position="last")
-        tabela=view[["Lote","Grupo","SKU","Descrição","Fornecedor","Quantidade","Fase","Data"]].copy()
-        tabela["Data"]=tabela["Data"].dt.strftime("%d/%m/%Y")
-        tabela=tabela.rename(columns={"Quantidade":"Peças","Fase":"Etapa","Data":"Chegada"})
-        st.dataframe(tabela,use_container_width=True,hide_index=True,height=500)
-    st.caption(f"Fonte: {st.session_state.get('sgo_relatorio_nome','SGO')} · {len(df_sgo):,} registros")
-
 elif st.session_state.aba_ativa_selecionada == "🛠️ Gerenciador (Admin)":
     if st.session_state.papel_atual != "gerente":
         st.error("⛔ Acesso restrito a usuários com papel de Gerente.")
@@ -3928,10 +2438,7 @@ elif st.session_state.aba_ativa_selecionada == "🛠️ Gerenciador (Admin)":
         st.markdown("<h3 style='text-align: center; color: #ffcc00;'>🛠️ Painel do Gerenciador</h3>", unsafe_allow_html=True)
         st.markdown("<p style='text-align: center; color: #8892b0;'>Funções críticas disponíveis apenas para o papel de Gerente.</p>", unsafe_allow_html=True)
 
-        tab_ger1, tab_ger2, tab_ger3, tab_ger4, tab_cfg1, tab_cfg2, tab_cfg3 = st.tabs([
-            "👥 Gestão de Logins", "🧾 Usuários Cadastrados", "📜 Histórico de Movimentações",
-            "🧹 Ações Globais", "🏗️ Estrutura do CD", "📦 Capacidades", "📏 Densidades Fixas"
-        ])
+        tab_ger1, tab_ger2, tab_ger3, tab_ger4 = st.tabs(["👥 Gestão de Logins", "🧾 Usuários Cadastrados", "📜 Histórico de Movimentações", "🧹 Ações Globais"])
 
         with tab_ger1:
             st.markdown("#### Criar Novo Login")
@@ -4052,60 +2559,3 @@ elif st.session_state.aba_ativa_selecionada == "🛠️ Gerenciador (Admin)":
                     if st.button("❌ Cancelar"):
                         st.session_state.confirmar_zerar_tudo = False
                         st.rerun()
-
-        with tab_cfg1:
-            st.markdown("#### 🏗️ Estrutura física do CD")
-            st.caption("A tabela abaixo é a fonte de verdade da estrutura. Listas de colunas podem ser separadas por vírgula, ponto e vírgula ou espaço.")
-            df_estrutura = carregar_estrutura_para_editor()
-            if df_estrutura is None:
-                st.error(f"⚠️ Não consegui carregar a estrutura. `{st.session_state.get('ultimo_erro_bd')}`")
-            else:
-                df_estrutura_editado = st.data_editor(df_estrutura, use_container_width=True, hide_index=True, num_rows="dynamic", column_config={
-                    "Rua": st.column_config.TextColumn("Rua", required=True),
-                    "Tipo": st.column_config.TextColumn("Tipo estrutural da rua", required=True),
-                    "Gênero": st.column_config.SelectboxColumn("Gênero", options=["Feminino","Masculino"], required=True),
-                }, key="editor_estrutura_cd")
-                if st.button("💾 Salvar estrutura no Supabase", type="primary", key="salvar_estrutura_cfg"):
-                    if salvar_estrutura_do_editor(df_estrutura_editado):
-                        st.session_state.configuracoes_cd_carregadas=True; st.success("Estrutura salva e recarregada com sucesso."); st.rerun()
-                    else:
-                        st.error(f"❌ Não foi possível salvar a estrutura. `{st.session_state.get('ultimo_erro_bd')}`")
-
-        with tab_cfg2:
-            st.markdown("#### 📦 Capacidade por categoria")
-            st.caption("Células vazias em Mínimo/Máximo significam combinação proibida. A lista inteira é editável e novas linhas podem ser adicionadas.")
-            df_capacidade = carregar_capacidade_para_editor()
-            if df_capacidade is None:
-                st.error(f"⚠️ Não consegui carregar as capacidades. `{st.session_state.get('ultimo_erro_bd')}`")
-            else:
-                df_capacidade_editado = st.data_editor(df_capacidade, use_container_width=True, hide_index=True, num_rows="dynamic", column_config={
-                    "Gênero": st.column_config.SelectboxColumn("Gênero", options=["Feminino","Masculino"], required=True),
-                    "Estação": st.column_config.SelectboxColumn("Estação", options=ESTACOES_PECA, required=True),
-                    "Categoria": st.column_config.TextColumn("Categoria", required=True),
-                    "Tipo de Casulo": st.column_config.SelectboxColumn("Tipo de Casulo", options=["P","M","G","Metal Raso (GG)","Madeira/Metal Prof. (3G)"], required=True),
-                    "Mínimo": st.column_config.NumberColumn("Mínimo", min_value=0, step=1),
-                    "Máximo": st.column_config.NumberColumn("Máximo", min_value=0, step=1),
-                }, key="editor_capacidade_categoria")
-                if st.button("💾 Salvar capacidades no Supabase", type="primary", key="salvar_capacidade_cfg"):
-                    if salvar_capacidade_do_editor(df_capacidade_editado):
-                        st.session_state.configuracoes_cd_carregadas=True; st.success("Capacidades salvas e recarregadas com sucesso."); st.rerun()
-                    else:
-                        st.error(f"❌ Não foi possível salvar as capacidades. `{st.session_state.get('ultimo_erro_bd')}`")
-
-        with tab_cfg3:
-            st.markdown("#### 📏 Densidade fixa por rua")
-            st.caption("São as exceções de capacidade fixa usadas hoje nas ruas 15 a 21. Elas também ficam editáveis no banco.")
-            df_fixa_cfg = carregar_capacidade_fixa_para_editor()
-            if df_fixa_cfg is None:
-                st.error(f"⚠️ Não consegui carregar as densidades fixas. `{st.session_state.get('ultimo_erro_bd')}`")
-            else:
-                df_fixa_editado = st.data_editor(df_fixa_cfg, use_container_width=True, hide_index=True, num_rows="dynamic", column_config={
-                    "Rua": st.column_config.TextColumn("Rua", required=True),
-                    "Tipo de Casulo": st.column_config.SelectboxColumn("Tipo estrutural", options=["aramado_P","aramado_M","aramado_G","metal_raso","metal_profundo","madeira"], required=True),
-                    "Capacidade": st.column_config.NumberColumn("Capacidade", min_value=0, step=1, required=True),
-                }, key="editor_capacidade_fixa")
-                if st.button("💾 Salvar densidades fixas no Supabase", type="primary", key="salvar_fixa_cfg"):
-                    if salvar_capacidade_fixa_do_editor(df_fixa_editado):
-                        st.session_state.configuracoes_cd_carregadas=True; st.success("Densidades fixas salvas e recarregadas com sucesso."); st.rerun()
-                    else:
-                        st.error(f"❌ Não foi possível salvar as densidades fixas. `{st.session_state.get('ultimo_erro_bd')}`")
