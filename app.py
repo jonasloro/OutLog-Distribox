@@ -9,6 +9,7 @@ import binascii
 import hmac
 import base64
 import csv
+from functools import lru_cache
 import unicodedata
 import zipfile
 import xml.etree.ElementTree as ET
@@ -21,6 +22,12 @@ try:
     PYPDF_DISPONIVEL = True
 except ImportError:
     PYPDF_DISPONIVEL = False
+
+try:
+    import fitz  # PyMuPDF
+    FITZ_DISPONIVEL = True
+except ImportError:
+    FITZ_DISPONIVEL = False
 
 try:
     import openpyxl
@@ -1020,11 +1027,9 @@ def normalizar_texto_analise(valor):
     return " ".join(texto.split())
 
 
-def ler_csv_estoque_upload(arquivo):
-    """Lê CSV do SofStore e retorna {codigo_barra: quantidade}."""
-    if arquivo is None:
-        return None
-    bruto = arquivo.getvalue()
+@st.cache_data(show_spinner=False, max_entries=8)
+def _ler_csv_estoque_bytes(bruto):
+    """Parser CSV cacheado. Preserva integralmente zeros à esquerda do barcode."""
     texto = bruto.decode("utf-8-sig", errors="replace")
     linhas = list(csv.reader(texto.splitlines(), delimiter=";"))
     idx_cabecalho = None
@@ -1044,7 +1049,8 @@ def ler_csv_estoque_upload(arquivo):
     for linha in linhas[idx_cabecalho + 1:]:
         if len(linha) <= max(idx_barra, idx_qtd):
             continue
-        codigo = re.sub(r"\D", "", str(linha[idx_barra]))
+        codigo_raw = str(linha[idx_barra]).strip()
+        codigo = re.sub(r"\D", "", codigo_raw)
         if not codigo:
             continue
         try:
@@ -1055,11 +1061,21 @@ def ler_csv_estoque_upload(arquivo):
     return resultado
 
 
-def ler_detalhamento_xlsx_upload(arquivo):
-    """Lê o XLSX de detalhamento sem depender de engine externo no Streamlit."""
+def ler_csv_estoque_upload(arquivo):
+    """Lê CSV do SofStore e retorna {codigo_barra: quantidade}.
+
+    O parser pesado é cacheado por bytes do upload. Isso evita reler o CSV em
+    cada rerenderização do Streamlit e mantém os códigos como texto.
+    """
     if arquivo is None:
+        return None
+    return _ler_csv_estoque_bytes(bytes(arquivo.getvalue()))
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def _ler_detalhamento_xlsx_bytes(bruto):
+    """Lê o XLSX de detalhamento sem depender de engine externo no Streamlit."""
+    if bruto is None:
         return {}
-    bruto = arquivo.getvalue()
     ns = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
     with zipfile.ZipFile(BytesIO(bruto)) as z:
         nomes = z.namelist()
@@ -1115,6 +1131,29 @@ def ler_detalhamento_xlsx_upload(arquivo):
 
 
 
+def ler_detalhamento_xlsx_upload(arquivo):
+    """Lê o XLSX do detalhamento com cache por conteúdo do upload."""
+    if arquivo is None:
+        return {}
+    return _ler_detalhamento_xlsx_bytes(bytes(arquivo.getvalue()))
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def _extrair_texto_pdf_bytes(bruto):
+    """Extrai texto do PDF uma única vez. PyMuPDF é usado quando disponível."""
+    if bruto is None:
+        return ""
+    if FITZ_DISPONIVEL:
+        doc = fitz.open(stream=bruto, filetype="pdf")
+        try:
+            return "\n".join((pagina.get_text("text") or "") for pagina in doc)
+        finally:
+            doc.close()
+    if not PYPDF_DISPONIVEL:
+        return ""
+    leitor = pypdf.PdfReader(BytesIO(bruto))
+    return "\n".join((pagina.extract_text(extraction_mode="layout") or "") for pagina in leitor.pages)
+
+
 def extrair_grupos_marcas_pdf_upload(arquivo):
     """Extrai grupos/marcas oficiais e, quando possível, o limite de peças por Marca+Grupo.
     O relatório do SofStore pode vir com quebras de linha diferentes; por isso usamos
@@ -1124,11 +1163,9 @@ def extrair_grupos_marcas_pdf_upload(arquivo):
     if arquivo is None or not PYPDF_DISPONIVEL:
         return [], []
 
-    leitor = pypdf.PdfReader(BytesIO(arquivo.getvalue()))
-    texto = "\n".join(
-        (pagina.extract_text(extraction_mode="layout") or "")
-        for pagina in leitor.pages
-    )
+    texto = _extrair_texto_pdf_bytes(bytes(arquivo.getvalue()))
+    if not texto:
+        return [], []
 
     padrao_linha_produto = re.compile(
         r"^(.*?)\s+(\d+)\s+([\d\.]+,\d{2})\s+([\d\.]+,\d{2})\s*$"
@@ -1235,7 +1272,8 @@ def extrair_grupos_marcas_pdf_upload(arquivo):
     return sorted(grupos_unicos), sorted(marcas_unicas)
 
 
-def extrair_mapa_oficial_grupo_marca_pdf(arquivo):
+@st.cache_data(show_spinner=False, max_entries=4)
+def _extrair_mapa_oficial_grupo_marca_pdf_bytes(bruto):
     """Extrai o mapa oficial (marca, grupo) -> quantidade do SofStore.
 
     Suporta os dois layouts que o SofStore já gerou neste projeto:
@@ -1248,21 +1286,16 @@ def extrair_mapa_oficial_grupo_marca_pdf(arquivo):
     O total oficial usado pela análise é a soma das linhas válidas,
     nunca o TOTAL bruto do PDF.
     """
-    if arquivo is None or not PYPDF_DISPONIVEL:
+    if bruto is None or not PYPDF_DISPONIVEL:
         return {}, [], [], 0
 
-    leitor = pypdf.PdfReader(BytesIO(arquivo.getvalue()))
-    paginas = []
-    for pagina in leitor.pages:
-        try:
-            txt = pagina.extract_text(extraction_mode='layout') or ''
-        except TypeError:
-            txt = pagina.extract_text() or ''
-        paginas.append(txt)
-    texto = '\n'.join(paginas)
-
-    # Descobre a orientação pelo cabeçalho do próprio PDF.
+    texto = _extrair_texto_pdf_bytes(bytes(bruto))
     header = ' '.join(texto.upper().split())
+    # Falha rápida e explicativa para o PDF de PRODUTOS, que não é o relatório
+    # Grupo x Marca esperado por esta tela. Evita processar centenas de páginas
+    # e depois devolver um resultado vazio.
+    if 'AGRUPADO POR:' not in header and 'GRUPO X MARCA' not in header:
+        return {}, [], [], 0
     if 'AGRUPADO POR: GRUPO' in header:
         orientacao = 'GRUPO_MARCA'
     elif 'AGRUPADO POR: MARCA' in header:
@@ -1359,6 +1392,12 @@ def extrair_mapa_oficial_grupo_marca_pdf(arquivo):
     official = dict(official)
     total_oficial = int(sum(official.values()))
     return official, sorted(groups), sorted(brands), total_oficial
+
+def extrair_mapa_oficial_grupo_marca_pdf(arquivo):
+    """Extrai Grupo x Marca oficial com cache por bytes do PDF."""
+    if arquivo is None:
+        return {}, [], [], 0
+    return _extrair_mapa_oficial_grupo_marca_pdf_bytes(bytes(arquivo.getvalue()))
 
 def classificar_grupo_analise(descricao, referencia, grupos):
     """Classifica o grupo oficial do SofStore com regras determinísticas.
@@ -1575,9 +1614,48 @@ def classificar_grupo_analise(descricao, referencia, grupos):
 
     return None
 
+def classificar_marca_analise(descricao, referencia, marcas):
+    """Fallback seguro para classificação de marca sem gerar NameError."""
+    texto = normalizar_texto_analise(f"{descricao} {referencia}")
+    tokens = texto.split()
+    melhor = None
+    melhor_tokens = -1
+    for marca in marcas or []:
+        mt = _tokens_sem_genero(marca) if "_tokens_sem_genero" in globals() else normalizar_texto_analise(marca).split()
+        if not mt:
+            continue
+        n = len(mt)
+        for pos in range(0, max(len(tokens)-n+1, 0)):
+            if tokens[pos:pos+n] == mt and n > melhor_tokens:
+                melhor = marca
+                melhor_tokens = n
+                break
+    return melhor
+
+
 def _tokens_sem_genero(nome):
     toks = normalizar_texto_analise(nome).split()
     return [t for t in toks if t not in {"FEMIN", "MASC", "FEMININO", "MASCULINO"}]
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def _preparar_indices_classificacao(grupos_tuple, marcas_tuple, mapa_items_tuple):
+    grupos_idx = []
+    for g in grupos_tuple:
+        ng = normalizar_texto_analise(g)
+        gt = _tokens_sem_genero(g)
+        if gt:
+            grupos_idx.append((len(gt), len(ng), g, tuple(gt)))
+    grupos_idx.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    marcas_idx = []
+    for m in marcas_tuple:
+        nm = normalizar_texto_analise(m)
+        bt = _tokens_sem_genero(m)
+        if bt:
+            marcas_idx.append((len(bt), len(nm), m, tuple(bt)))
+    marcas_idx.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    oficial = set(mapa_items_tuple)
+    return tuple(grupos_idx), tuple(marcas_idx), frozenset(oficial)
 
 
 def classificar_grupo_marca_por_descricao(descricao, referencia, mapa_oficial, grupos, marcas):
@@ -1595,34 +1673,19 @@ def classificar_grupo_marca_por_descricao(descricao, referencia, mapa_oficial, g
     if not toks:
         return None, None, "sem descrição"
 
-    def grupo_prefixo(candidatos):
-        achados = []
-        for g in candidatos:
-            gt = _tokens_sem_genero(g)
-            if gt and len(toks) >= len(gt) and toks[:len(gt)] == gt:
-                achados.append((len(gt), g, gt))
-        achados.sort(key=lambda x: (x[0], len(normalizar_texto_analise(x[1]))), reverse=True)
-        return achados[0] if achados else None
+    grupos_idx, marcas_idx, oficial_pairs = _preparar_indices_classificacao(
+        tuple(grupos or []), tuple(marcas or []), tuple(sorted((mapa_oficial or {}).keys()))
+    )
 
-    def marca_imediata(pos, candidatos):
-        achados = []
-        for m in candidatos:
-            bt = _tokens_sem_genero(m)
-            if bt and len(toks) >= pos + len(bt) and toks[pos:pos+len(bt)] == bt:
-                achados.append((len(bt), m, bt))
-        achados.sort(key=lambda x: (x[0], len(normalizar_texto_analise(x[1]))), reverse=True)
-        return achados[0] if achados else None
-
-    gp = grupo_prefixo(grupos or [])
+    gp = next((x for x in grupos_idx if len(toks) >= x[0] and tuple(toks[:x[0]]) == x[3]), None)
     if gp:
-        _, grupo, gt = gp
-        mp = marca_imediata(len(gt), marcas or [])
+        _, _, grupo, gt = gp
+        mp = next((x for x in marcas_idx if len(toks) >= len(gt) + x[0] and tuple(toks[len(gt):len(gt)+x[0]]) == x[3]), None)
         if mp:
-            _, marca, _ = mp
+            _, _, marca, _ = mp
             gn = normalizar_texto_analise(grupo)
             mn = normalizar_texto_analise(marca)
-            # O cadastro oficial de Grupo x Marca é a confirmação final.
-            if not mapa_oficial or (mn, gn) in mapa_oficial:
+            if not oficial_pairs or (mn, gn) in oficial_pairs:
                 return grupo, marca, "prefixo descricao"
 
     # Segunda tentativa: pares oficiais completos, útil quando um grupo oficial
@@ -1719,7 +1782,15 @@ def _assinatura_arquivos_rua1(*arquivos):
                 tamanho = len(arq.getvalue())
             except Exception:
                 tamanho = 0
-        partes.append(f"{file_id or nome}|{tamanho}")
+        if file_id:
+            partes.append(f"{file_id}|{tamanho}")
+        else:
+            try:
+                bruto = bytes(arq.getvalue())
+                amostra = bruto[:65536] + bruto[-65536:] if len(bruto) > 131072 else bruto
+                partes.append(f"{nome}|{tamanho}|{hashlib.sha1(amostra).hexdigest()}")
+            except Exception:
+                partes.append(f"{nome}|{tamanho}")
     return "||".join(partes)
 
 
@@ -3359,6 +3430,12 @@ elif st.session_state.aba_ativa_selecionada == "📊 Análise Rua 1 por Grupo":
                     estoque_total = ler_csv_estoque_upload(arquivo_todas)
                     estoque_r1 = ler_csv_estoque_upload(arquivo_r1)
                     detalhamento = ler_detalhamento_xlsx_upload(arquivo_detalhe)
+                    if not estoque_total:
+                        raise ValueError("O arquivo 'Todas as Ruas' não contém estoque válido por código de barras.")
+                    if not estoque_r1:
+                        raise ValueError("O arquivo 'Rua 1' não contém estoque válido por código de barras.")
+                    if not detalhamento:
+                        raise ValueError("O arquivo de detalhamento não contém produtos reconhecíveis.")
 
                     mapa_oficial, grupos_oficiais, marcas_oficiais, total_oficial = (
                         extrair_mapa_oficial_grupo_marca_pdf(arquivo_grupos)
@@ -3367,8 +3444,8 @@ elif st.session_state.aba_ativa_selecionada == "📊 Análise Rua 1 por Grupo":
 
                     if not mapa_oficial:
                         st.session_state.rua1_analise_erro = (
-                            "📋 O PDF oficial não trouxe linhas Grupo × Marca reconhecíveis. "
-                            "Use o relatório Grupo × Marca do SofStore."
+                            "📋 O PDF enviado não é um relatório Grupo × Marca reconhecível. "
+                            "O arquivo atual parece ser um Relatório de Produtos; envie o PDF específico de Grupo × Marca para esta análise."
                         )
                         st.session_state.rua1_analise_df = None
                         st.session_state.rua1_analise_meta = None
@@ -3388,7 +3465,11 @@ elif st.session_state.aba_ativa_selecionada == "📊 Análise Rua 1 por Grupo":
                     st.session_state.rua1_analise_assinatura = assinatura
 
             if st.session_state.get("rua1_analise_erro"):
-                st.error(st.session_state.rua1_analise_erro)
+                # Nunca mostrar análise antiga como se fosse da nova combinação de arquivos.
+                if st.session_state.get("rua1_analise_assinatura") == assinatura:
+                    st.error(st.session_state.rua1_analise_erro)
+                else:
+                    st.error(st.session_state.rua1_analise_erro)
             else:
                 df_analise = st.session_state.get("rua1_analise_df")
                 meta = st.session_state.get("rua1_analise_meta")
