@@ -2655,39 +2655,113 @@ if not st.session_state.autenticado:
 STATUS_SGO_ORDEM = ["🧵 Aviamento","🚚 Em Trânsito","🏭 Processamento","📦 Em Estocagem","🔎 Qualidade","✅ Concluído"]
 
 def _sgo_fase(status):
+    """Converte os status do relatório SGO para as etapas usadas pelo painel."""
     sl = str(status or "").strip().lower()
-    # Rejeitados saem do fluxo operacional: serão devolvidos ao fornecedor.
     if "rejeitado" in sl:
         return "⛔ Rejeitado"
-    # Retrabalho continua dentro da fila da Qualidade.
     if "retrabalho" in sl:
         return "🔎 Qualidade"
     if "inspe" in sl or "qualidade" in sl:
         return "🔎 Qualidade"
-    if "aviamento" in sl: return "🧵 Aviamento"
-    if "trânsito" in sl or "transito" in sl: return "🚚 Em Trânsito"
-    if "estocagem" in sl: return "📦 Em Estocagem"
-    if "aguardando processamento" in sl or "processamento" in sl: return "🏭 Processamento"
-    if "aguardando envio" in sl or "envio" in sl: return "🚚 Em Trânsito"
-    if "conclu" in sl: return "✅ Concluído"
+
+    # Status do relatório atual:
+    # PCP - Configurar Aviamento
+    # Compras - Em Trânsito
+    # Logística - Área de Processamento
+    # Logística - Em Estocagem
+    if "aviamento" in sl:
+        return "🧵 Aviamento"
+    if "trânsito" in sl or "transito" in sl or "em trânsito" in sl:
+        return "🚚 Em Trânsito"
+    if "processamento" in sl:
+        return "🏭 Processamento"
+    if "estocagem" in sl:
+        return "📦 Em Estocagem"
+    if "aguardando envio" in sl or "envio" in sl:
+        return "🚚 Em Trânsito"
+    if "conclu" in sl:
+        return "✅ Concluído"
+
     return str(status or "⚪ Sem status").strip() or "⚪ Sem status"
 
+
+def _limpar_texto_sgo(serie):
+    return (
+        serie.fillna("")
+        .astype(str)
+        .str.replace(r"^'+", "", regex=True)
+        .str.strip()
+    )
+
+
+def _data_sgo(serie):
+    # O SGO exporta datas como DD/MM/AAAA; valores como "'-" devem virar NaT.
+    limpa = _limpar_texto_sgo(serie)
+    limpa = limpa.replace({"-": "", "": np.nan, "nan": np.nan, "NaT": np.nan})
+    return pd.to_datetime(limpa, errors="coerce", dayfirst=True)
+
+
 def _normalizar_sgo(df):
+    """Normaliza o relatório real do SGO para o modelo interno do aplicativo."""
     df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
     cols = set(df.columns)
-    out = pd.DataFrame()
+
+    # Formato oficial usado pelo relatório enviado: 'Lotes por Produto'.
+    colunas_relatorio_produto = {
+        "Grupo/Categoria", "SKU", "Descrição", "Fornecedor", "Quantidade",
+        "Status (Kanban)", "Lote", "Data Esperada", "Data Chegada"
+    }
+
+    out = pd.DataFrame(index=df.index)
+
+    if colunas_relatorio_produto.issubset(cols):
+        out["ID"] = _limpar_texto_sgo(df["Lote"])
+        out.loc[out["ID"].eq(""), "ID"] = df.index.astype(str)
+
+        out["Grupo"] = _limpar_texto_sgo(df["Grupo/Categoria"])
+        out["SKU"] = _limpar_texto_sgo(df["SKU"])
+        out["Descrição"] = _limpar_texto_sgo(df["Descrição"])
+        out["Fornecedor"] = _limpar_texto_sgo(df["Fornecedor"])
+
+        out["Quantidade"] = (
+            pd.to_numeric(
+                df["Quantidade"].astype(str).str.replace(",", ".", regex=False),
+                errors="coerce"
+            )
+            .fillna(0)
+            .round()
+            .astype(int)
+        )
+
+        out["StatusOriginal"] = _limpar_texto_sgo(df["Status (Kanban)"])
+        out["Fase"] = out["StatusOriginal"].map(_sgo_fase)
+
+        # Para o SGO, 'Data Esperada' é a data operacional principal.
+        out["Data"] = _data_sgo(df["Data Esperada"])
+        out["DataChegada"] = _data_sgo(df["Data Chegada"])
+
+        # Mantém o lote sem o '.0' que aparece em algumas exportações do Excel.
+        out["Lote"] = (
+            _limpar_texto_sgo(df["Lote"])
+            .str.replace(r"\.0$", "", regex=True)
+        )
+        out["Origem"] = "SGO — Lotes por Produto"
+
+        return out
+
     if {"Grupo/Categoria","SKU","Quantidade","Status (Kanban)"}.issubset(cols):
         out["ID"] = df.get("Lote", pd.Series(df.index.astype(str), index=df.index)).astype(str)
-        out["Grupo"] = df["Grupo/Categoria"].astype(str)
-        out["SKU"] = df["SKU"].astype(str)
-        out["Descrição"] = df.get("Descrição", pd.Series("", index=df.index)).astype(str)
-        out["Fornecedor"] = df.get("Fornecedor", pd.Series("", index=df.index)).astype(str)
+        out["Grupo"] = _limpar_texto_sgo(df["Grupo/Categoria"])
+        out["SKU"] = _limpar_texto_sgo(df["SKU"])
+        out["Descrição"] = _limpar_texto_sgo(df.get("Descrição", pd.Series("", index=df.index)))
+        out["Fornecedor"] = _limpar_texto_sgo(df.get("Fornecedor", pd.Series("", index=df.index)))
         out["Quantidade"] = pd.to_numeric(df["Quantidade"], errors="coerce").fillna(0).astype(int)
-        out["StatusOriginal"] = df["Status (Kanban)"].astype(str)
+        out["StatusOriginal"] = _limpar_texto_sgo(df["Status (Kanban)"])
         out["Fase"] = out["StatusOriginal"].map(_sgo_fase)
-        out["Data"] = pd.to_datetime(df.get("Data Esperada"), errors="coerce", dayfirst=True)
-        out["DataChegada"] = pd.to_datetime(df.get("Data Chegada"), errors="coerce", dayfirst=True)
-        out["Lote"] = df.get("Lote", out["ID"]).astype(str).str.replace(r"\.0$","",regex=True)
+        out["Data"] = _data_sgo(df.get("Data Esperada", pd.Series(pd.NaT, index=df.index)))
+        out["DataChegada"] = _data_sgo(df.get("Data Chegada", pd.Series(pd.NaT, index=df.index)))
+        out["Lote"] = _limpar_texto_sgo(df.get("Lote", out["ID"])).str.replace(r"\.0$","",regex=True)
         out["Origem"] = "Fluxo SGO"
         return out
     if {"ID Compra","Fornecedor","Status Compra","Data Entrega Prevista","Qtd Itens","Grupo"}.issubset(cols):
@@ -2727,8 +2801,29 @@ def _normalizar_sgo(df):
     raise ValueError("Este arquivo não parece ser um relatório SGO compatível.")
 
 def carregar_relatorio_sgo(uploaded_file):
-    if uploaded_file is None: return None
-    return _normalizar_sgo(pd.read_excel(uploaded_file, sheet_name=0))
+    if uploaded_file is None:
+        return None
+
+    # O relatório enviado pelo SGO usa a aba 'Lotes por Produto'.
+    # Mantemos fallback para a primeira aba para não quebrar arquivos antigos.
+    try:
+        xls = pd.ExcelFile(uploaded_file)
+        aba = "Lotes por Produto" if "Lotes por Produto" in xls.sheet_names else xls.sheet_names[0]
+        bruto = pd.read_excel(xls, sheet_name=aba)
+    except Exception as e:
+        raise ValueError(f"Não foi possível ler o Excel do SGO: {e}")
+
+    try:
+        return _normalizar_sgo(bruto)
+    except ValueError:
+        faltantes = sorted({
+            "Grupo/Categoria", "SKU", "Descrição", "Fornecedor", "Quantidade",
+            "Status (Kanban)", "Lote", "Data Esperada", "Data Chegada"
+        } - set(bruto.columns))
+        raise ValueError(
+            "Este arquivo não corresponde ao formato esperado do SGO. "
+            f"Colunas faltantes: {', '.join(faltantes)}"
+        )
 
 
 def salvar_relatorio_sgo_supabase(df_sgo, nome_arquivo):
