@@ -5,3 +5,4 @@ pillow
 pypdf
 openpyxl
 psycopg2-binary
+requests
