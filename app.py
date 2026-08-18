@@ -582,6 +582,9 @@ def _chamar_api_id_brasil(rota, params=None):
         return None
 
     url = f"{cfg['base_url']}/{rota.lstrip('/')}"
+    # Log visível na tela — assim dá pra conferir, a cada clique, que a
+    # chamada é sempre um GET e pra onde ela está indo (sem expor a senha).
+    st.caption(f"🔎 Chamando: **GET** `{url}` (params={params})")
     try:
         resposta = requests.get(
             url,
@@ -589,6 +592,7 @@ def _chamar_api_id_brasil(rota, params=None):
             params=params,
             timeout=20,
         )
+        st.caption(f"↩️ Método realmente enviado pelo servidor HTTP: **{resposta.request.method}** — status {resposta.status_code}")
         resposta.raise_for_status()
         st.session_state.ultimo_erro_id_brasil = None
         return resposta.json()
