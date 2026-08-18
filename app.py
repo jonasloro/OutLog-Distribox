@@ -16,6 +16,13 @@ from PIL import Image
 from datetime import datetime
 
 try:
+    import requests
+    from requests.auth import HTTPBasicAuth
+    REQUESTS_DISPONIVEL = True
+except ImportError:
+    REQUESTS_DISPONIVEL = False
+
+try:
     import pypdf
     PYPDF_DISPONIVEL = True
 except ImportError:
@@ -504,6 +511,105 @@ def testar_conexao_bd():
     except Exception as e:
         st.session_state.ultimo_erro_bd = f"falha ao fechar conexão de teste: {e}"
         return False
+
+# ==========================================
+# INTEGRAÇÃO API ID BRASIL — SOMENTE LEITURA (GET)
+# ==========================================
+# Regra severa deste projeto: esta integração NUNCA envia dados para a API
+# ID Brasil. Só existe uma função de rede aqui (`_chamar_api_id_brasil`) e
+# ela usa exclusivamente requests.get(...). Não adicionar requests.post,
+# requests.put, requests.patch ou requests.delete para essa API neste
+# arquivo — se precisar escrever algo, é outro sistema, não este.
+#
+# Autenticação: HTTP Basic (Authorization: Basic base64(usuario:senha)).
+# Credenciais ficam nos Secrets do Streamlit, nunca no código-fonte.
+#
+# Formato esperado nos Secrets (Settings → Secrets do Streamlit):
+# ID_BRASIL_API_BASE_URL = "https://host-da-api"   # sem barra no final, sem rota
+# ID_BRASIL_API_USUARIO = "..."
+# ID_BRASIL_API_SENHA = "..."
+#
+# Também aceitamos a variação em seção [id_brasil], caso prefira organizar
+# os secrets em blocos:
+# [id_brasil]
+# base_url = "..."
+# usuario = "..."
+# senha = "..."
+
+def _obter_config_id_brasil():
+    """Retorna (base_url, usuario, senha) a partir dos Secrets do Streamlit,
+    ou None se não estiver configurado/incompleto."""
+    try:
+        if "ID_BRASIL_API_BASE_URL" in st.secrets:
+            return {
+                "base_url": st.secrets["ID_BRASIL_API_BASE_URL"].rstrip("/"),
+                "usuario": st.secrets["ID_BRASIL_API_USUARIO"],
+                "senha": st.secrets["ID_BRASIL_API_SENHA"],
+            }
+        if "id_brasil" in st.secrets:
+            cfg = st.secrets["id_brasil"]
+            return {
+                "base_url": cfg["base_url"].rstrip("/"),
+                "usuario": cfg["usuario"],
+                "senha": cfg["senha"],
+            }
+    except Exception as e:
+        st.session_state.ultimo_erro_id_brasil = f"Secrets da API ID Brasil inválidos/incompletos: {e}"
+        return None
+
+    st.session_state.ultimo_erro_id_brasil = (
+        "Secrets da API ID Brasil não configurados. Use ID_BRASIL_API_BASE_URL, "
+        "ID_BRASIL_API_USUARIO e ID_BRASIL_API_SENHA em Settings → Secrets do Streamlit."
+    )
+    return None
+
+def _chamar_api_id_brasil(rota, params=None):
+    """Faz UM ÚNICO tipo de chamada à API ID Brasil: um GET autenticado via
+    HTTP Basic numa rota relativa à base_url (ex: 'casulo', 'casulo/total').
+    Retorna o JSON decodificado (dict/list) em caso de sucesso, ou None em
+    caso de falha (o erro fica em st.session_state.ultimo_erro_id_brasil).
+
+    Não escreve nada na API — só leitura, por regra do projeto.
+    """
+    if not REQUESTS_DISPONIVEL:
+        st.session_state.ultimo_erro_id_brasil = (
+            "biblioteca 'requests' não instalada — adicione requests ao requirements.txt do repositório"
+        )
+        return None
+
+    cfg = _obter_config_id_brasil()
+    if cfg is None:
+        return None
+
+    url = f"{cfg['base_url']}/{rota.lstrip('/')}"
+    try:
+        resposta = requests.get(
+            url,
+            auth=HTTPBasicAuth(cfg["usuario"], cfg["senha"]),
+            params=params,
+            timeout=20,
+        )
+        resposta.raise_for_status()
+        st.session_state.ultimo_erro_id_brasil = None
+        return resposta.json()
+    except requests.exceptions.RequestException as e:
+        st.session_state.ultimo_erro_id_brasil = f"falha ao consultar API ID Brasil ({rota}): {e}"
+        return None
+    except ValueError as e:
+        # resposta não veio em JSON válido
+        st.session_state.ultimo_erro_id_brasil = f"resposta da API ID Brasil ({rota}) não é JSON válido: {e}"
+        return None
+
+def consultar_casulos_id_brasil(offset=0):
+    """GET /casulo?offset=... — posições de estoque, uma página por vez.
+    Ainda não sabemos o tamanho de página nem os nomes dos campos, então por
+    enquanto isso só devolve o payload cru para inspeção."""
+    return _chamar_api_id_brasil("casulo", params={"offset": offset})
+
+def consultar_total_casulos_id_brasil():
+    """GET /casulo/total — inteiro puro com a contagem total de casulos,
+    usado pra saber quantas páginas percorrer em consultar_casulos_id_brasil."""
+    return _chamar_api_id_brasil("casulo/total")
 
 # ==========================================
 # CONFIGURAÇÕES DO CD NO SUPABASE
@@ -1244,6 +1350,10 @@ if 'banco_dados_conectado' not in st.session_state:
     st.session_state.banco_dados_conectado = testar_conexao_bd()
 if 'ultimo_erro_bd' not in st.session_state:
     st.session_state.ultimo_erro_bd = None
+if 'ultimo_erro_id_brasil' not in st.session_state:
+    st.session_state.ultimo_erro_id_brasil = None
+if 'ultimo_payload_id_brasil' not in st.session_state:
+    st.session_state.ultimo_payload_id_brasil = None
 
 if 'busca_destaque' not in st.session_state:
     st.session_state.busca_destaque = None
@@ -1931,6 +2041,30 @@ if st.session_state.aba_ativa_selecionada == "🏠 Tela Inicial (Geral)":
 # TELA 2: VISUALIZADOR DE CASULOS
 # ==========================================
 elif st.session_state.aba_ativa_selecionada == "📦 Visualizador de Casulos":
+
+    with st.expander("🔄 Sincronizar da API ID Brasil (somente leitura)", expanded=False):
+        st.caption(
+            "Consulta a API ID Brasil via GET (não escreve nada nela). "
+            "Por enquanto ainda não sabemos o tamanho de página nem os nomes "
+            "dos campos de 'casulo', então este botão busca o total e a "
+            "primeira página crua — assim que virmos o formato real, o "
+            "próximo passo é mapear os campos e paginar tudo automaticamente."
+        )
+        if st.button("🔄 Buscar da API ID Brasil", key="btn_sync_id_brasil"):
+            with st.spinner("Consultando API ID Brasil..."):
+                total = consultar_total_casulos_id_brasil()
+                primeira_pagina = consultar_casulos_id_brasil(offset=0)
+            st.session_state.ultimo_payload_id_brasil = {
+                "casulo_total": total,
+                "casulo_offset_0": primeira_pagina,
+            }
+
+        if st.session_state.ultimo_erro_id_brasil:
+            st.error(f"❌ {st.session_state.ultimo_erro_id_brasil}")
+        elif st.session_state.ultimo_payload_id_brasil is not None:
+            st.success("✅ Resposta recebida. Confira o formato abaixo:")
+            st.json(st.session_state.ultimo_payload_id_brasil)
+
     lista_ruas = list(ESTRUTURA_CD.keys())
     rua_inicial_idx = 0
     if st.session_state.busca_destaque and st.session_state.busca_destaque['rua'] in lista_ruas:
