@@ -1,7 +1,9 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import re
+import math
 import hashlib
 import os
 import binascii
@@ -466,16 +468,7 @@ def renderizar_visualizador_dinamico_id_brasil(rua_nome, grade_rua):
             st.markdown("</div>", unsafe_allow_html=True)
             return
 
-        colunas_exibidas = colunas_lado
-        if len(colunas_lado) > 20:
-            tamanho_bloco = 20
-            blocos = [
-                (f"Colunas {colunas_lado[i]:03d} até {colunas_lado[min(i+tamanho_bloco-1, len(colunas_lado)-1)]:03d}", colunas_lado[i:i+tamanho_bloco])
-                for i in range(0, len(colunas_lado), tamanho_bloco)
-            ]
-            opcoes_bloco = [b[0] for b in blocos]
-            bloco_escolhido = st.selectbox("Bloco de colunas:", opcoes_bloco, key=chave_col_widget)
-            colunas_exibidas = next(b[1] for b in blocos if b[0] == bloco_escolhido)
+        colunas_exibidas = selecionar_bloco_colunas(colunas_lado, 20, chave_col_widget)
 
         renderizar_cabecalho_colunas(colunas_exibidas)
         for nivel in niveis_presentes:
@@ -527,6 +520,41 @@ def montar_html_nicho(rua_selecionada, col_num, nivel, spec, chave_lado):
     classe_destaque = "destaque-ativo" if is_destaque else ""
 
     return f"<div class='nicho {status} {classe_destaque}' title='{col_num:03d}-{nivel} | {pecas_atuais}/{capacidade_estimada} peças ({pct_ocupacao:.1f}% da capacidade){fonte_txt}'>{pecas_atuais}/{capacidade_estimada}</div>"
+
+def selecionar_bloco_colunas(todas_colunas, tamanho_bloco, chave_estado):
+    """Mostra um bloco de colunas por vez com botões ◀ ▶ pra navegar sem
+    precisar subir a tela e trocar num seletor lá em cima. chave_estado
+    precisa ser única (ex: nome da rua + lado) pra cada grade ter sua
+    própria posição de navegação."""
+    if len(todas_colunas) <= tamanho_bloco:
+        return todas_colunas
+
+    total_blocos = math.ceil(len(todas_colunas) / tamanho_bloco)
+    chave_idx = f"bloco_idx_{chave_estado}"
+    if chave_idx not in st.session_state:
+        st.session_state[chave_idx] = 0
+    st.session_state[chave_idx] = max(0, min(st.session_state[chave_idx], total_blocos - 1))
+    idx = st.session_state[chave_idx]
+
+    col_nav1, col_nav2, col_nav3 = st.columns([1, 3, 1])
+    with col_nav1:
+        if st.button("◀", key=f"prev_{chave_idx}", disabled=(idx == 0), use_container_width=True):
+            st.session_state[chave_idx] -= 1
+            st.rerun()
+    with col_nav2:
+        inicio = todas_colunas[idx * tamanho_bloco]
+        fim = todas_colunas[min((idx + 1) * tamanho_bloco, len(todas_colunas)) - 1]
+        st.markdown(
+            f"<p style='text-align:center; color:#8892b0; font-size:12px; padding-top:6px;'>"
+            f"Bloco {idx + 1}/{total_blocos} — colunas {inicio:03d} a {fim:03d}</p>",
+            unsafe_allow_html=True
+        )
+    with col_nav3:
+        if st.button("▶", key=f"next_{chave_idx}", disabled=(idx >= total_blocos - 1), use_container_width=True):
+            st.session_state[chave_idx] += 1
+            st.rerun()
+
+    return todas_colunas[idx * tamanho_bloco: (idx + 1) * tamanho_bloco]
 
 def renderizar_cabecalho_colunas(lista_colunas):
     grid_header = st.columns(len(lista_colunas) + 1)
@@ -2146,31 +2174,93 @@ st.sidebar.markdown(f"""
 """, unsafe_allow_html=True)
 st.sidebar.markdown("<h2 style='color: #ffcc00; text-align: center;'>⚙️ NAVEGAÇÃO</h2>", unsafe_allow_html=True)
 
-opcoes_telas = [
-    "🏠 Tela Inicial (Geral)", 
-    "📦 Visualizador de Casulos", 
-    "🔍 Consulta Rápida de Casulos", 
+TELA_EXPEDICAO = "🚚 Expedição (Teste)"
+
+# Estrutura de setores — decisão tomada com você: SGO fica em Recebimento
+# (é sobre entrada chegando), Expedição (Teste) vira parte do setor
+# Expedição de verdade em vez de botão escondido, e Qualidade/Processamento
+# ficam como setores vazios prontos pra receber telas futuras.
+telas_estocagem = [
+    "🏠 Tela Inicial (Geral)",
+    "📦 Visualizador de Casulos",
+    "🔍 Consulta Rápida de Casulos",
     "📊 Estatísticas de Casulos",
     "🧪 Simulador de Capacidade",
     "📄 Importar Relatório de Estoque",
     "📥 Entrada de Dados / Abastecimento",
-    "🚚 SGO — Próximas Entradas"
 ]
 if st.session_state.papel_atual == "gerente":
-    opcoes_telas.append("🛠️ Gerenciador (Admin)")
+    telas_estocagem.append("🛠️ Gerenciador (Admin)")
 
-TELA_EXPEDICAO = "🚚 Expedição (Teste)"
+SETORES = [
+    ("📥 Recebimento", ["🚚 SGO — Próximas Entradas"]),
+    ("🔎 Qualidade", []),
+    ("🏭 Processamento", []),
+    ("📦 Estocagem", telas_estocagem),
+    ("🚚 Expedição", [TELA_EXPEDICAO]),
+]
 
-if st.session_state.aba_ativa_selecionada not in opcoes_telas and st.session_state.aba_ativa_selecionada != TELA_EXPEDICAO:
+opcoes_telas = [tela for _, telas in SETORES for tela in telas]
+
+if st.session_state.aba_ativa_selecionada not in opcoes_telas:
     st.session_state.aba_ativa_selecionada = "🏠 Tela Inicial (Geral)"
 
-if "radio_nav_widget" not in st.session_state:
-    st.session_state.radio_nav_widget = st.session_state.aba_ativa_selecionada if st.session_state.aba_ativa_selecionada in opcoes_telas else opcoes_telas[0]
+if "primeira_carga_feita" not in st.session_state:
+    st.session_state.primeira_carga_feita = False
+if "sidebar_deve_colapsar" not in st.session_state:
+    st.session_state.sidebar_deve_colapsar = False
 
-def _sincronizar_nav_radio():
-    st.session_state.aba_ativa_selecionada = st.session_state.radio_nav_widget
+def _navegar_para(tela_escolhida, chave_widget):
+    if st.session_state[chave_widget] != st.session_state.aba_ativa_selecionada:
+        st.session_state.aba_ativa_selecionada = st.session_state[chave_widget]
+        st.session_state.sidebar_deve_colapsar = True
 
-st.sidebar.radio("Selecione a Tela:", opcoes_telas, key="radio_nav_widget", on_change=_sincronizar_nav_radio)
+for setor_nome, telas_do_setor in SETORES:
+    if not telas_do_setor:
+        with st.sidebar.expander(setor_nome, expanded=False):
+            st.caption("Em breve.")
+        continue
+
+    setor_contem_tela_ativa = st.session_state.aba_ativa_selecionada in telas_do_setor
+    with st.sidebar.expander(setor_nome, expanded=setor_contem_tela_ativa):
+        chave_widget = f"nav_{setor_nome}"
+        indice_inicial = telas_do_setor.index(st.session_state.aba_ativa_selecionada) if setor_contem_tela_ativa else 0
+        st.radio(
+            "Selecione a tela:", telas_do_setor, index=indice_inicial,
+            key=chave_widget, label_visibility="collapsed",
+            on_change=_navegar_para, args=(setor_nome, chave_widget),
+        )
+
+# Colapsa a sidebar automaticamente depois que o usuário navega pra
+# qualquer tela — mas só a partir da SEGUNDA renderização em diante, pra
+# ficar expandida no primeiro carregamento do app, como pedido.
+# IMPORTANTE: o Streamlit não tem uma função oficial pra isso — este é um
+# truque via JavaScript que clica no botão de recolher da sidebar. Funciona
+# nas versões atuais, mas depende da estrutura interna (DOM) do Streamlit,
+# então pode parar de funcionar numa atualização futura deles.
+if st.session_state.primeira_carga_feita and st.session_state.sidebar_deve_colapsar:
+    components.html(
+        """
+        <script>
+        (function() {
+            const doc = window.parent.document;
+            const seletores = [
+                '[data-testid="stSidebarCollapseButton"] button',
+                'button[data-testid="stSidebarCollapseButton"]',
+                'button[kind="header"][aria-label*="ollapse"]',
+                'button[aria-label*="ollapse sidebar"]',
+            ];
+            for (const seletor of seletores) {
+                const botao = doc.querySelector(seletor);
+                if (botao) { botao.click(); break; }
+            }
+        })();
+        </script>
+        """,
+        height=0, width=0,
+    )
+    st.session_state.sidebar_deve_colapsar = False
+st.session_state.primeira_carga_feita = True
 
 st.sidebar.markdown(f"<p style='text-align:center; color:#8892b0; font-size:12px;'>👤 <b>{st.session_state.usuario_atual}</b> ({st.session_state.papel_atual.capitalize()})</p>", unsafe_allow_html=True)
 if st.session_state.banco_dados_conectado:
@@ -2215,20 +2305,13 @@ if st.sidebar.button("Destacar no Sistema"):
                         'col': col_buscada
                     }
                     st.session_state.aba_ativa_selecionada = "📦 Visualizador de Casulos"
-                    st.session_state.radio_nav_widget = "📦 Visualizador de Casulos"
+                    st.session_state.sidebar_deve_colapsar = True
                     st.sidebar.success(f"Casulo localizado!")
                     st.rerun()
         else:
             st.sidebar.error("Rua não encontrada!")
     else:
         st.sidebar.error("Formato inválido! Use ex: 003-B-009")
-
-# ACESSO RÁPIDO — EXPEDIÇÃO (TESTE)
-st.sidebar.markdown("---")
-st.sidebar.markdown("<h4 style='color: #ffcc00;'>🚚 Expedição</h4>", unsafe_allow_html=True)
-if st.sidebar.button("Botico do jaco", use_container_width=True):
-    st.session_state.aba_ativa_selecionada = TELA_EXPEDICAO
-    st.rerun()
 
 # BRANDING DO APP
 st.markdown(f"""
@@ -2272,8 +2355,17 @@ if st.session_state.aba_ativa_selecionada == "🏠 Tela Inicial (Geral)":
             if r_n == rua_nome:
                 l_param = "par" if rua_nome == "Rua 11" else ("impar" if lado_r == "seq" else lado_r)
                 spec_r = obter_especificacao_casulo(rua_nome, int(c_r), l_param)
-                soma_fracoes += calcular_fracao_ocupada(dados_casulo, spec_r["tipo_estrutural"], rua_nome)
-                pecas_casulo = calcular_pecas_totais(dados_casulo)
+                qtd_id_brasil = st.session_state.quantidades_id_brasil.get(chave)
+                if qtd_id_brasil is not None:
+                    # Mesma regra do Visualizador: quando existe dado real
+                    # sincronizado pra esse casulo, ele manda — sem isso, a
+                    # Visão Geral ficava presa só no lançamento manual.
+                    capacidade_r = obter_capacidade_estimada_segura(spec_r["tipo_estrutural"], rua_nome)
+                    soma_fracoes += (qtd_id_brasil / capacidade_r) if capacidade_r else 0.0
+                    pecas_casulo = qtd_id_brasil
+                else:
+                    soma_fracoes += calcular_fracao_ocupada(dados_casulo, spec_r["tipo_estrutural"], rua_nome)
+                    pecas_casulo = calcular_pecas_totais(dados_casulo)
                 soma_pecas += pecas_casulo
                 contagem += 1
                 if pecas_casulo == 0:
@@ -2338,7 +2430,7 @@ if st.session_state.aba_ativa_selecionada == "🏠 Tela Inicial (Geral)":
                 st.session_state.busca_destaque = None
                 st.session_state.rua_forcada_visualizador = rua
                 st.session_state.aba_ativa_selecionada = "📦 Visualizador de Casulos"
-                st.session_state.radio_nav_widget = "📦 Visualizador de Casulos"
+                st.session_state.sidebar_deve_colapsar = True
                 st.rerun()
 
     st.write("---")
@@ -2468,14 +2560,7 @@ elif st.session_state.aba_ativa_selecionada == "📦 Visualizador de Casulos":
             if not todas_colunas:
                 st.warning("⚠️ Não existem colunas cadastradas para a Rua 20.")
             else:
-                if len(todas_colunas) > 25:
-                    tamanho_bloco = 25
-                    blocos = [(f"Colunas {todas_colunas[i]:03d} até {todas_colunas[min(i+tamanho_bloco-1, len(todas_colunas)-1)]:03d}", todas_colunas[i:i+tamanho_bloco]) for i in range(0, len(todas_colunas), tamanho_bloco)]
-                    opcoes_bloco = [b[0] for b in blocos]
-                    bloco_escolhido_nome = st.selectbox("Selecione o Bloco de Colunas:", opcoes_bloco)
-                    colunas_exemplo = next(b[1] for b in blocos if b[0] == bloco_escolhido_nome)
-                else:
-                    colunas_exemplo = todas_colunas
+                colunas_exemplo = selecionar_bloco_colunas(todas_colunas, 25, "Rua20_seq")
 
                 niveis_ordenados = sorted(NIVEIS_P)
 
@@ -2501,14 +2586,7 @@ elif st.session_state.aba_ativa_selecionada == "📦 Visualizador de Casulos":
             if not todas_colunas:
                 st.warning("⚠️ Não existem colunas cadastradas para a Rua 21.")
             else:
-                if len(todas_colunas) > 25:
-                    tamanho_bloco = 25
-                    blocos = [(f"Colunas {todas_colunas[i]:03d} até {todas_colunas[min(i+tamanho_bloco-1, len(todas_colunas)-1)]:03d}", todas_colunas[i:i+tamanho_bloco]) for i in range(0, len(todas_colunas), tamanho_bloco)]
-                    opcoes_bloco = [b[0] for b in blocos]
-                    bloco_escolhido_nome = st.selectbox("Selecione o Bloco de Colunas:", opcoes_bloco)
-                    colunas_exemplo = next(b[1] for b in blocos if b[0] == bloco_escolhido_nome)
-                else:
-                    colunas_exemplo = todas_colunas
+                colunas_exemplo = selecionar_bloco_colunas(todas_colunas, 25, "Rua21_seq")
 
                 spec_ref = obter_especificacao_casulo(rua_selecionada, colunas_exemplo[0], "impar")
                 niveis_ordenados = sorted(spec_ref["niveis"])
@@ -2537,14 +2615,7 @@ elif st.session_state.aba_ativa_selecionada == "📦 Visualizador de Casulos":
             if not todas_colunas:
                 st.warning(f"⚠️ Não existem casulos cadastrados nesta rua ({rua_selecionada}).")
             else:
-                if len(todas_colunas) > 25:
-                    tamanho_bloco = 25
-                    blocos = [(f"Colunas {todas_colunas[i]:03d} até {todas_colunas[min(i+tamanho_bloco-1, len(todas_colunas)-1)]:03d}", todas_colunas[i:i+tamanho_bloco]) for i in range(0, len(todas_colunas), tamanho_bloco)]
-                    opcoes_bloco = [b[0] for b in blocos]
-                    bloco_escolhido_nome = st.selectbox("Selecione o Bloco de Colunas:", opcoes_bloco)
-                    colunas_exemplo = next(b[1] for b in blocos if b[0] == bloco_escolhido_nome)
-                else:
-                    colunas_exemplo = todas_colunas
+                colunas_exemplo = selecionar_bloco_colunas(todas_colunas, 25, f"{rua_selecionada}_seq")
 
                 l_ref = "par" if rua_selecionada == "Rua 11" else "impar"
                 spec_ref = obter_especificacao_casulo(rua_selecionada, colunas_exemplo[0] if colunas_exemplo else 22, l_ref)
@@ -2577,14 +2648,7 @@ elif st.session_state.aba_ativa_selecionada == "📦 Visualizador de Casulos":
             if not todas_colunas:
                 st.warning(f"⚠️ Não existem casulos cadastrados nesta rua ({rua_selecionada}).")
             else:
-                if len(todas_colunas) > 20:
-                    tamanho_bloco = 20
-                    blocos = [(f"Colunas {todas_colunas[i]:03d} até {todas_colunas[min(i+tamanho_bloco-1, len(todas_colunas)-1)]:03d}", todas_colunas[i:i+tamanho_bloco]) for i in range(0, len(todas_colunas), tamanho_bloco)]
-                    opcoes_bloco = [b[0] for b in blocos]
-                    bloco_escolhido_nome = st.selectbox("Selecione o Bloco de Colunas:", opcoes_bloco)
-                    colunas_exemplo = next(b[1] for b in blocos if b[0] == bloco_escolhido_nome)
-                else:
-                    colunas_exemplo = todas_colunas
+                colunas_exemplo = selecionar_bloco_colunas(todas_colunas, 20, f"{rua_selecionada}_generica")
 
                 colunas_impares = [c for c in colunas_exemplo if c in todas_cols_impares]
                 colunas_pares = [c for c in colunas_exemplo if c in todas_cols_pares]
