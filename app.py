@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import re
@@ -1877,39 +1876,40 @@ st.markdown("""
         color: #0b0c10 !important;
     }
 
-    /* Menu de navegação da sidebar: some com a bolinha do rádio e vira
-       item de menu estilo "pílula" clicável. */
-    section[data-testid="stSidebar"] div[data-testid="stRadio"] > div[role="radiogroup"] {
-        gap: 4px;
-    }
-    section[data-testid="stSidebar"] div[data-testid="stRadio"] label {
+    /* Menu de navegação da sidebar: botões alinhados à esquerda, estilo
+       item de menu. O item da tela ativa usa type="primary" (amarelo). */
+    section[data-testid="stSidebar"] div[data-testid="stExpander"] button[kind="secondary"] {
         background-color: #1f2833;
         border: 1px solid #283845;
         border-radius: 8px;
-        padding: 9px 12px;
-        width: 100%;
-        cursor: pointer;
+        color: #c5c6c7;
+        font-size: 13px;
+        font-weight: 400;
+        text-align: left;
+        justify-content: flex-start;
+        padding: 8px 12px;
         transition: background-color 0.15s, border-color 0.15s;
     }
-    section[data-testid="stSidebar"] div[data-testid="stRadio"] label:hover {
+    section[data-testid="stSidebar"] div[data-testid="stExpander"] button[kind="secondary"]:hover {
         border-color: #ffcc00;
         background-color: #283845;
+        color: #ffffff;
     }
-    section[data-testid="stSidebar"] div[data-testid="stRadio"] label > div:first-child {
-        display: none;
-    }
-    section[data-testid="stSidebar"] div[data-testid="stRadio"] label div[data-testid="stMarkdownContainer"] p {
-        color: #c5c6c7;
-        font-size: 14px;
-        margin: 0;
-    }
-    section[data-testid="stSidebar"] div[data-testid="stRadio"] label:has(input:checked) {
+    section[data-testid="stSidebar"] div[data-testid="stExpander"] button[kind="primary"] {
         background-color: #ffcc00;
-        border-color: #ffcc00;
-    }
-    section[data-testid="stSidebar"] div[data-testid="stRadio"] label:has(input:checked) div[data-testid="stMarkdownContainer"] p {
+        border: 1px solid #ffcc00;
+        border-radius: 8px;
         color: #0b0c10;
+        font-size: 13px;
         font-weight: 700;
+        text-align: left;
+        justify-content: flex-start;
+        padding: 8px 12px;
+    }
+    section[data-testid="stSidebar"] div[data-testid="stExpander"] button[kind="primary"]:hover {
+        background-color: #ffd633;
+        border-color: #ffd633;
+        color: #0b0c10;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -1972,6 +1972,36 @@ def _sgo_fase(status):
     if "conclu" in sl: return "✅ Concluído"
     return str(status or "⚪ Sem status").strip() or "⚪ Sem status"
 
+FASES_JA_ESTOCADO = ["📦 Em Estocagem", "✅ Concluído"]
+FASES_FORA_DO_FLUXO = ["✅ Concluído", "⛔ Rejeitado"]
+
+def _enriquecer_sgo(out):
+    """Adiciona as colunas derivadas que a tela usa: separa chegada REAL de
+    chegada AGENDADA (o relatório usa a mesma coluna pras duas coisas — uma
+    data de chegada no futuro é agendamento, não recebimento), calcula há
+    quantos dias o lote está parado dentro de casa, e o valor imobilizado."""
+    hoje = pd.Timestamp.today().normalize()
+
+    chegada = out["DataChegada"]
+    ja_chegou = chegada.notna() & (chegada <= hoje)
+    out["ChegouDeFato"] = ja_chegou
+    out["DataChegadaReal"] = chegada.where(ja_chegou)
+    out["DataChegadaPrevista"] = chegada.where(chegada.notna() & (chegada > hoje))
+
+    # Dias parado só faz sentido pro que já entrou fisicamente e ainda não
+    # foi estocado — é o tempo que o lote está ocupando espaço sem estar
+    # disponível.
+    ainda_nao_estocado = ~out["Fase"].isin(FASES_JA_ESTOCADO)
+    dias = (hoje - out["DataChegadaReal"]).dt.days
+    out["DiasParado"] = dias.where(ja_chegou & ainda_nao_estocado)
+    out["EmCasaNaoEstocado"] = ja_chegou & ainda_nao_estocado & ~out["Fase"].isin(["⛔ Rejeitado"])
+
+    out["ValorCusto"] = out["Quantidade"] * out.get("CustoUnit", 0.0)
+
+    # Desvio de entrega: negativo = fornecedor adiantou, positivo = atrasou.
+    out["DesvioEntregaDias"] = (out["DataChegadaReal"] - out["Data"]).dt.days
+    return out
+
 def _normalizar_sgo(df):
     df = df.copy()
     cols = set(df.columns)
@@ -1987,9 +2017,10 @@ def _normalizar_sgo(df):
         out["Fase"] = out["StatusOriginal"].map(_sgo_fase)
         out["Data"] = pd.to_datetime(df.get("Data Esperada"), errors="coerce", dayfirst=True)
         out["DataChegada"] = pd.to_datetime(df.get("Data Chegada"), errors="coerce", dayfirst=True)
+        out["CustoUnit"] = pd.to_numeric(df.get("Preço de Custo"), errors="coerce").fillna(0.0)
         out["Lote"] = df.get("Lote", out["ID"]).astype(str).str.replace(r"\.0$","",regex=True)
         out["Origem"] = "Fluxo SGO"
-        return out
+        return _enriquecer_sgo(out)
     if {"ID Compra","Fornecedor","Status Compra","Data Entrega Prevista","Qtd Itens","Grupo"}.issubset(cols):
         out["ID"] = df["ID Compra"].astype(str)
         out["Grupo"] = df["Grupo"].astype(str)
@@ -2021,9 +2052,11 @@ def _normalizar_sgo(df):
             d2 = pd.to_datetime(df["Data Esperada"], errors="coerce", dayfirst=True)
             out["Data"] = d2.fillna(out["Data"])
         out["DataChegada"] = pd.to_datetime(df.get("Data Recebimento Real", pd.Series(pd.NaT,index=df.index)), errors="coerce")
+        custo_col = df.get("Preço de Custo", df.get("Custo Unitário", pd.Series(0.0, index=df.index)))
+        out["CustoUnit"] = pd.to_numeric(custo_col, errors="coerce").fillna(0.0)
         out["Lote"] = df.get("Lote", df["ID Compra"]).astype(str).str.replace(r"\.0$","",regex=True)
         out["Origem"] = "Compras / SGO"
-        return out
+        return _enriquecer_sgo(out)
     raise ValueError("Este arquivo não parece ser um relatório SGO compatível.")
 
 def carregar_relatorio_sgo(uploaded_file):
@@ -2076,18 +2109,43 @@ def salvar_relatorio_sgo_supabase(df_sgo, nome_arquivo):
                     data_prevista,
                     data_chegada,
                     str(r.get("Origem", "")),
+                    float(r.get("CustoUnit", 0.0) or 0.0),
                 ))
 
             if linhas:
-                execute_values(
-                    cur,
-                    """INSERT INTO public.sgo_lotes
-                    (relatorio_id, lote, grupo, sku, descricao, fornecedor, quantidade,
-                     status_original, fase, data_prevista, data_chegada, origem)
-                    VALUES %s""",
-                    linhas,
-                    page_size=500,
-                )
+                try:
+                    execute_values(
+                        cur,
+                        """INSERT INTO public.sgo_lotes
+                        (relatorio_id, lote, grupo, sku, descricao, fornecedor, quantidade,
+                         status_original, fase, data_prevista, data_chegada, origem, custo_unit)
+                        VALUES %s""",
+                        linhas,
+                        page_size=500,
+                    )
+                except Exception:
+                    # A coluna custo_unit ainda não existe nesta base — grava sem
+                    # ela (o app continua funcionando; só o valor imobilizado
+                    # fica indisponível até rodar o ALTER TABLE).
+                    conn.rollback()
+                    cur.execute(
+                        """INSERT INTO public.sgo_relatorios
+                           (nome_arquivo, importado_em, importado_por, quantidade_registros, ativo)
+                           VALUES (%s, %s, %s, %s, TRUE)
+                           RETURNING id""",
+                        (nome_arquivo, agora.to_pydatetime(), str(usuario), int(len(df_sgo)))
+                    )
+                    relatorio_id = cur.fetchone()[0]
+                    linhas_sem_custo = [(relatorio_id,) + linha[1:-1] for linha in linhas]
+                    execute_values(
+                        cur,
+                        """INSERT INTO public.sgo_lotes
+                        (relatorio_id, lote, grupo, sku, descricao, fornecedor, quantidade,
+                         status_original, fase, data_prevista, data_chegada, origem)
+                        VALUES %s""",
+                        linhas_sem_custo,
+                        page_size=500,
+                    )
 
         conn.commit()
         conn.close()
@@ -2121,15 +2179,29 @@ def carregar_ultimo_relatorio_sgo_supabase():
                 return None, None
 
             relatorio_id, nome_arquivo = meta
-            cur.execute(
-                """SELECT lote, grupo, sku, descricao, fornecedor, quantidade,
-                          status_original, fase, data_prevista, data_chegada, origem
-                   FROM public.sgo_lotes
-                   WHERE relatorio_id = %s
-                   ORDER BY data_prevista DESC NULLS LAST, id DESC""",
-                (relatorio_id,)
-            )
-            rows = cur.fetchall()
+            try:
+                cur.execute(
+                    """SELECT lote, grupo, sku, descricao, fornecedor, quantidade,
+                              status_original, fase, data_prevista, data_chegada, origem, custo_unit
+                       FROM public.sgo_lotes
+                       WHERE relatorio_id = %s
+                       ORDER BY data_prevista DESC NULLS LAST, id DESC""",
+                    (relatorio_id,)
+                )
+                rows = cur.fetchall()
+                tem_custo = True
+            except Exception:
+                conn.rollback()
+                cur.execute(
+                    """SELECT lote, grupo, sku, descricao, fornecedor, quantidade,
+                              status_original, fase, data_prevista, data_chegada, origem
+                       FROM public.sgo_lotes
+                       WHERE relatorio_id = %s
+                       ORDER BY data_prevista DESC NULLS LAST, id DESC""",
+                    (relatorio_id,)
+                )
+                rows = cur.fetchall()
+                tem_custo = False
 
         conn.close()
 
@@ -2137,13 +2209,18 @@ def carregar_ultimo_relatorio_sgo_supabase():
             "Lote", "Grupo", "SKU", "Descrição", "Fornecedor", "Quantidade",
             "StatusOriginal", "Fase", "Data", "DataChegada", "Origem"
         ]
+        if tem_custo:
+            cols.append("CustoUnit")
         df = pd.DataFrame(rows, columns=cols)
+        if not tem_custo:
+            df["CustoUnit"] = 0.0
         df["Quantidade"] = pd.to_numeric(df["Quantidade"], errors="coerce").fillna(0).astype(int)
+        df["CustoUnit"] = pd.to_numeric(df["CustoUnit"], errors="coerce").fillna(0.0)
         df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
         df["DataChegada"] = pd.to_datetime(df["DataChegada"], errors="coerce")
         for c in ["Lote", "Grupo", "SKU", "Descrição", "Fornecedor", "StatusOriginal", "Fase", "Origem"]:
             df[c] = df[c].fillna("").astype(str)
-        return df, nome_arquivo
+        return _enriquecer_sgo(df), nome_arquivo
     except Exception as e:
         try:
             conn.close()
@@ -2210,11 +2287,6 @@ if "primeira_carga_feita" not in st.session_state:
 if "sidebar_deve_colapsar" not in st.session_state:
     st.session_state.sidebar_deve_colapsar = False
 
-def _navegar_para(tela_escolhida, chave_widget):
-    if st.session_state[chave_widget] != st.session_state.aba_ativa_selecionada:
-        st.session_state.aba_ativa_selecionada = st.session_state[chave_widget]
-        st.session_state.sidebar_deve_colapsar = True
-
 for setor_nome, telas_do_setor in SETORES:
     if not telas_do_setor:
         with st.sidebar.expander(setor_nome, expanded=False):
@@ -2223,13 +2295,18 @@ for setor_nome, telas_do_setor in SETORES:
 
     setor_contem_tela_ativa = st.session_state.aba_ativa_selecionada in telas_do_setor
     with st.sidebar.expander(setor_nome, expanded=setor_contem_tela_ativa):
-        chave_widget = f"nav_{setor_nome}"
-        indice_inicial = telas_do_setor.index(st.session_state.aba_ativa_selecionada) if setor_contem_tela_ativa else 0
-        st.radio(
-            "Selecione a tela:", telas_do_setor, index=indice_inicial,
-            key=chave_widget, label_visibility="collapsed",
-            on_change=_navegar_para, args=(setor_nome, chave_widget),
-        )
+        for tela in telas_do_setor:
+            # Botão (e não radio): um radio só dispara on_change quando o
+            # valor MUDA, então um setor com uma única tela nunca navegava.
+            e_tela_atual = (tela == st.session_state.aba_ativa_selecionada)
+            if st.button(
+                tela, key=f"nav_{setor_nome}_{tela}",
+                use_container_width=True,
+                type="primary" if e_tela_atual else "secondary",
+            ):
+                st.session_state.aba_ativa_selecionada = tela
+                st.session_state.sidebar_deve_colapsar = True
+                st.rerun()
 
 # Colapsa a sidebar automaticamente depois que o usuário navega pra
 # qualquer tela — mas só a partir da SEGUNDA renderização em diante, pra
@@ -2238,28 +2315,11 @@ for setor_nome, telas_do_setor in SETORES:
 # truque via JavaScript que clica no botão de recolher da sidebar. Funciona
 # nas versões atuais, mas depende da estrutura interna (DOM) do Streamlit,
 # então pode parar de funcionar numa atualização futura deles.
-if st.session_state.primeira_carga_feita and st.session_state.sidebar_deve_colapsar:
-    components.html(
-        """
-        <script>
-        (function() {
-            const doc = window.parent.document;
-            const seletores = [
-                '[data-testid="stSidebarCollapseButton"] button',
-                'button[data-testid="stSidebarCollapseButton"]',
-                'button[kind="header"][aria-label*="ollapse"]',
-                'button[aria-label*="ollapse sidebar"]',
-            ];
-            for (const seletor of seletores) {
-                const botao = doc.querySelector(seletor);
-                if (botao) { botao.click(); break; }
-            }
-        })();
-        </script>
-        """,
-        height=0, width=0,
-    )
+if "sidebar_deve_colapsar" not in st.session_state:
     st.session_state.sidebar_deve_colapsar = False
+if "primeira_carga_feita" not in st.session_state:
+    st.session_state.primeira_carga_feita = True
+
 st.session_state.primeira_carga_feita = True
 
 st.sidebar.markdown(f"<p style='text-align:center; color:#8892b0; font-size:12px;'>👤 <b>{st.session_state.usuario_atual}</b> ({st.session_state.papel_atual.capitalize()})</p>", unsafe_allow_html=True)
@@ -3485,47 +3545,105 @@ elif st.session_state.aba_ativa_selecionada == "🚚 SGO — Próximas Entradas"
         st.info("📄 Envie o relatório do SGO para começar.\n\nSe já existir uma importação salva, o OutLog carregará automaticamente o último relatório do Supabase.")
         st.stop()
 
-    # Rejeitados não entram no fluxo operacional: serão devolvidos ao fornecedor.
-    # Concluídos também saem da fila.
-    aberto=df_sgo[~df_sgo["Fase"].isin(["✅ Concluído","⛔ Rejeitado"])].copy()
-    if aberto.empty: aberto=df_sgo.copy()
-    aberto["Horizonte"]=aberto["Data"].map(_sgo_horizonte)
-    total=int(aberto["Quantidade"].sum())
-    ate7=int(aberto.loc[aberto["Horizonte"]=="Até 7 dias","Quantidade"].sum())
-    atrasado=int(aberto.loc[aberto["Horizonte"]=="Atrasado","Quantidade"].sum())
-    transito=int(aberto.loc[aberto["Fase"]=="🚚 Em Trânsito","Quantidade"].sum())
+    # ---------- KPIs: o que está DENTRO de casa parado, não só o que vem ----------
+    em_casa = df_sgo[df_sgo["EmCasaNaoEstocado"]].copy()
+    pecas_em_casa = int(em_casa["Quantidade"].sum())
+    valor_em_casa = float(em_casa["ValorCusto"].sum())
 
-    qualidade=int(df_sgo.loc[df_sgo["Fase"]=="🔎 Qualidade","Quantidade"].sum())
-    c1,c2,c3,c4=st.columns(4)
-    with c1: _sgo_card("Total em aberto",total,f"{len(aberto):,} registros","#ffcc00")
-    with c2: _sgo_card("Próximos 7 dias",ate7,"prioridade","#45a29e")
-    with c3: _sgo_card("Atrasados",atrasado,"precisam de atenção","#e74c3c")
-    with c4: _sgo_card("🔎 Qualidade",qualidade,"inspeção / retrabalho","#c77dff")
+    parado_30 = em_casa[em_casa["DiasParado"] >= 30]
+    pecas_parado_30 = int(parado_30["Quantidade"].sum())
 
-    st.markdown("### 🧭 Onde está agora?")
-    ordem=["🧵 Aviamento","🚚 Em Trânsito","🏭 Processamento","📦 Em Estocagem","🔎 Qualidade","✅ Concluído"]
-    cols=st.columns(len(ordem))
-    for i,fase in enumerate(ordem):
-        sub=df_sgo[df_sgo["Fase"]==fase]
-        qtd=int(sub["Quantidade"].sum())
+    hoje_ts = pd.Timestamp.today().normalize()
+    a_caminho = df_sgo[
+        (~df_sgo["Fase"].isin(FASES_FORA_DO_FLUXO))
+        & (~df_sgo["EmCasaNaoEstocado"])
+        & (df_sgo["Data"].notna())
+        & (df_sgo["Data"] <= hoje_ts + pd.Timedelta(days=7))
+    ]
+    pecas_7dias = int(a_caminho["Quantidade"].sum())
+
+    # Ponte com o CD: quanto espaço isso vai exigir
+    casulos_estimados = math.ceil(pecas_em_casa / 12) if pecas_em_casa else 0
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        _sgo_card("Em casa, não estocado", pecas_em_casa, f"{len(em_casa):,} registros", "#e74c3c")
+    with c2:
+        _sgo_card("Parado há 30+ dias", pecas_parado_30, f"{len(parado_30):,} registros", "#f39c12")
+    with c3:
+        _sgo_card("Chega em até 7 dias", pecas_7dias, "a receber", "#45a29e")
+    with c4:
+        _sgo_card("Espaço necessário", casulos_estimados, "~casulos M (ref.)", "#ffcc00")
+
+    if valor_em_casa > 0:
+        st.caption(f"💰 Valor de custo parado dentro do CD: **R$ {valor_em_casa:,.2f}** — peças que já chegaram e ainda não estão disponíveis.")
+    st.caption("ℹ️ 'Em casa, não estocado' conta só o que chegou de fato (data de chegada até hoje). Datas de chegada futuras são tratadas como agendamento, não recebimento.")
+
+    # ---------- Kanban com tempo médio, não só volume ----------
+    st.markdown("### 🧭 Onde está travando?")
+    ordem = ["🧵 Aviamento", "🚚 Em Trânsito", "🏭 Processamento", "📦 Em Estocagem", "🔎 Qualidade", "✅ Concluído"]
+    cols = st.columns(len(ordem))
+    for i, fase in enumerate(ordem):
+        sub = df_sgo[df_sgo["Fase"] == fase]
+        qtd = int(sub["Quantidade"].sum())
+        dias_medio = sub["DiasParado"].mean()
+        if pd.notna(dias_medio) and dias_medio > 0:
+            cor_dias = "#e74c3c" if dias_medio >= 30 else ("#f39c12" if dias_medio >= 15 else "#8892b0")
+            txt_dias = f"<div style='font-size:10px;color:{cor_dias};font-weight:700'>⏱ {dias_medio:.0f} dias em média</div>"
+        else:
+            txt_dias = "<div style='font-size:10px;color:#6f7b86'>—</div>"
         with cols[i]:
-            st.markdown(f"""<div style='background:#11161d;border:1px solid #283845;border-radius:10px;padding:10px;text-align:center;min-height:86px;'>
+            st.markdown(f"""<div style='background:#11161d;border:1px solid #283845;border-radius:10px;padding:10px;text-align:center;min-height:104px;'>
             <div style='font-size:11px;color:#b7c0c8;font-weight:700'>{fase}</div>
             <div style='font-size:22px;font-weight:900;color:#ffcc00;margin-top:5px'>{qtd:,}</div>
-            <div style='font-size:10px;color:#6f7b86'>{len(sub):,} registros</div></div>""",unsafe_allow_html=True)
+            <div style='font-size:10px;color:#6f7b86'>{len(sub):,} registros</div>
+            {txt_dias}</div>""", unsafe_allow_html=True)
 
-    rejeitados=int(df_sgo.loc[df_sgo["Fase"]=="⛔ Rejeitado","Quantidade"].sum())
+    rejeitados = int(df_sgo.loc[df_sgo["Fase"] == "⛔ Rejeitado", "Quantidade"].sum())
     if rejeitados:
-        st.caption(f"⛔ {rejeitados:,} peças rejeitadas foram retiradas do fluxo operacional e não entram no total em aberto.")
+        st.caption(f"⛔ {rejeitados:,} peças rejeitadas foram retiradas do fluxo operacional e não entram nos totais acima.")
 
-    st.markdown("### 🔥 Próximos que merecem atenção")
-    # Visualização cronológica: mais novo → mais velho. Registros sem data ficam por último.
-    prioridade=aberto.sort_values(["Data"], ascending=[False], na_position="last").head(8)
-    if not prioridade.empty:
-        ex=prioridade[["Data","Grupo","Fornecedor","Quantidade","Fase","Lote"]].copy()
-        ex["Data"]=ex["Data"].dt.strftime("%d/%m/%Y")
-        ex=ex.rename(columns={"Data":"Chegada","Quantidade":"Peças","Fase":"Etapa","Lote":"Lote"})
-        st.dataframe(ex,use_container_width=True,hide_index=True,height=285)
+    # ---------- Ranking de envelhecimento (substitui a antiga lista de 'urgentes') ----------
+    st.markdown("### ⏳ Parados há mais tempo dentro do CD")
+    if em_casa.empty:
+        st.success("✅ Nada parado: tudo que chegou já está estocado.")
+    else:
+        envelhecidos = em_casa.sort_values("DiasParado", ascending=False).head(10)
+        tabela_env = envelhecidos[["DiasParado", "Lote", "Grupo", "Fornecedor", "Quantidade", "Fase", "DataChegadaReal"]].copy()
+        tabela_env["DataChegadaReal"] = tabela_env["DataChegadaReal"].dt.strftime("%d/%m/%Y")
+        tabela_env["DiasParado"] = tabela_env["DiasParado"].astype(int)
+        tabela_env = tabela_env.rename(columns={
+            "DiasParado": "Dias parado", "Quantidade": "Peças",
+            "Fase": "Etapa", "DataChegadaReal": "Chegou em",
+        })
+        st.dataframe(tabela_env, use_container_width=True, hide_index=True, height=390)
+        botao_exportar_excel(tabela_env, "sgo_parados.xlsx", key="export_sgo_parados")
+
+    # ---------- Fornecedor: volume em aberto e pontualidade ----------
+    with st.expander("🏭 Por fornecedor — volume em aberto e pontualidade"):
+        aberto_forn = df_sgo[~df_sgo["Fase"].isin(FASES_FORA_DO_FLUXO)]
+        if aberto_forn.empty:
+            st.info("Nada em aberto no momento.")
+        else:
+            resumo_forn = aberto_forn.groupby("Fornecedor").agg(
+                Registros=("Lote", "count"),
+                Peças=("Quantidade", "sum"),
+                Valor=("ValorCusto", "sum"),
+                Desvio=("DesvioEntregaDias", "mean"),
+            ).reset_index().sort_values("Peças", ascending=False)
+            resumo_forn["Valor"] = resumo_forn["Valor"].round(2)
+            resumo_forn["Desvio"] = resumo_forn["Desvio"].round(1)
+            resumo_forn = resumo_forn.rename(columns={
+                "Valor": "Valor custo (R$)", "Desvio": "Desvio entrega (dias)",
+            })
+            st.dataframe(resumo_forn, use_container_width=True, hide_index=True)
+            st.caption("Desvio negativo = fornecedor entregou ANTES do previsto. Positivo = atrasou.")
+            botao_exportar_excel(resumo_forn, "sgo_fornecedores.xlsx", key="export_sgo_forn")
+
+    # ---------- Tabela completa (mantida, com filtros) ----------
+    aberto = df_sgo[~df_sgo["Fase"].isin(FASES_FORA_DO_FLUXO)].copy()
+    if aberto.empty:
+        aberto = df_sgo.copy()
 
     with st.expander("🔎 Filtrar e ver todos os registros"):
         f1,f2,f3=st.columns(3)
@@ -3541,12 +3659,13 @@ elif st.session_state.aba_ativa_selecionada == "🚚 SGO — Próximas Entradas"
             b=busca.strip().lower()
             m=(view["Lote"].str.lower().str.contains(b,na=False)|view["SKU"].str.lower().str.contains(b,na=False)|view["Descrição"].str.lower().str.contains(b,na=False))
             view=view[m]
-        # Lista completa também segue da data mais nova para a mais antiga.
-        view=view.sort_values("Data", ascending=False, na_position="last")
-        tabela=view[["Lote","Grupo","SKU","Descrição","Fornecedor","Quantidade","Fase","Data"]].copy()
+        # Mais crítico primeiro: o que está parado há mais tempo no topo.
+        view=view.sort_values(["DiasParado","Data"], ascending=[False,True], na_position="last")
+        tabela=view[["Lote","Grupo","SKU","Descrição","Fornecedor","Quantidade","Fase","Data","DiasParado"]].copy()
         tabela["Data"]=tabela["Data"].dt.strftime("%d/%m/%Y")
-        tabela=tabela.rename(columns={"Quantidade":"Peças","Fase":"Etapa","Data":"Chegada"})
+        tabela=tabela.rename(columns={"Quantidade":"Peças","Fase":"Etapa","Data":"Previsto","DiasParado":"Dias parado"})
         st.dataframe(tabela,use_container_width=True,hide_index=True,height=500)
+        botao_exportar_excel(tabela, "sgo_completo.xlsx", key="export_sgo_completo")
     st.caption(f"Fonte: {st.session_state.get('sgo_relatorio_nome','SGO')} · {len(df_sgo):,} registros")
 
 elif st.session_state.aba_ativa_selecionada == "🛠️ Gerenciador (Admin)":
