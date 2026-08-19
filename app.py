@@ -73,46 +73,112 @@ st.set_page_config(
 # ==========================================
 
 ESTRUTURA_CD_PADRAO = {
-    # Rua 01 — porta-palete, fora do scope do Visualizador por ora
+    # Rua 01 — porta-palete, fora do scope do Visualizador
     "Rua 01": {"tipo": "Morta", "cols_impar": [], "cols_par": []},
-    # Rua 02 — Par 22-102(P) | Ímpar 21-93(P) | Seq 103-139(G)
-    "Rua 02": {"tipo": "Misto_Transicao_R02", "cols_par": list(range(22, 104, 2)), "cols_impar": list(range(21, 94, 2)), "cols_seq": list(range(103, 140))},
-    # Rua 03 — Par 22-102(P) | Ímpar 19-103(P)
-    "Rua 03": {"tipo": "P", "cols_par": list(range(22, 104, 2)), "cols_impar": list(range(19, 104, 2))},
-    # Rua 04 — Ímpar 21-105(P) | Par 22-100(G)
-    "Rua 04": {"tipo": "Misto_Lado", "cols_impar": list(range(21, 106, 2)), "cols_par": list(range(22, 102, 2))},
-    # Rua 05 — Ímpar 21-101(M) | Par 22-100(M)
-    "Rua 05": {"tipo": "M", "cols_impar": list(range(21, 102, 2)), "cols_par": list(range(22, 102, 2))},
-    # Rua 06 — Ímpar 1-81(M) | Par 2-82(M)
-    "Rua 06": {"tipo": "M", "cols_impar": list(range(1, 82, 2)), "cols_par": list(range(2, 84, 2))},
-    # Rua 07 — Ímpar 59-139(M) | Par 60-140(M)
-    "Rua 07": {"tipo": "M", "cols_impar": list(range(59, 140, 2)), "cols_par": list(range(60, 142, 2))},
-    # Rua 08 — Ímpar 1-81(M) | Par 2-80(M)
-    "Rua 08": {"tipo": "M", "cols_impar": list(range(1, 82, 2)), "cols_par": list(range(2, 82, 2))},
-    # Rua 09 — Ímpar 21-103(M) | Par 22-100(M)
-    "Rua 09": {"tipo": "M", "cols_impar": list(range(21, 104, 2)), "cols_par": list(range(22, 102, 2))},
-    # Rua 10 — Ímpar 21-103(G) | Par 22-100(G)
-    "Rua 10": {"tipo": "G", "cols_impar": list(range(21, 104, 2)), "cols_par": list(range(22, 102, 2))},
-    # Rua 11 — Par 22-94(G) unilateral + apêndice metal 129,131,133
-    "Rua 11": {"tipo": "G_Unilateral", "cols_impar": [], "cols_par": list(range(22, 96, 2)), "metal": [129, 131, 133]},
+
+    # Rua 02 — Par 22-102 (P) | Ímpar 21-93 (P) | Seq 103-139 (G unilateral)
+    "Rua 02": {"tipo": "Misto_Transicao_R02",
+                "cols_par":   list(range(22, 104, 2)),
+                "cols_impar": list(range(19, 94,  2)),
+                "cols_seq":   list(range(103, 140))},
+
+    # Rua 03 — Par 22-102 (P) | Ímpar 19-103 (P)
+    "Rua 03": {"tipo": "P",
+                "cols_par":   list(range(22, 104, 2)),
+                "cols_impar": list(range(19, 104, 2))},
+
+    # Rua 04 — Ímpar 21-105 (P) | Par 22-100 (G)
+    "Rua 04": {"tipo": "Misto_Lado",
+                "cols_impar": list(range(21, 106, 2)),
+                "cols_par":   list(range(22, 102, 2))},
+
+    # Rua 05 — Ímpar 21-101 (M) | Par 22-100 (M)
+    "Rua 05": {"tipo": "M",
+                "cols_impar": list(range(21, 102, 2)),
+                "cols_par":   list(range(22, 102, 2))},
+
+    # Rua 06 — Ímpar 1-81 (M) | Par 2-82 (M)
+    "Rua 06": {"tipo": "M",
+                "cols_impar": list(range(1, 82, 2)),
+                "cols_par":   list(range(2, 84, 2))},
+
+    # Rua 07 — Ímpar 59-139 (M) | Par 60-140 (M)
+    "Rua 07": {"tipo": "M",
+                "cols_impar": list(range(59, 140, 2)),
+                "cols_par":   list(range(60, 142, 2))},
+
+    # Rua 08 — Par 2-80 (M) | Ímpar 1-81 (M)
+    "Rua 08": {"tipo": "M",
+                "cols_par":   list(range(2, 82, 2)),
+                "cols_impar": list(range(1, 82, 2))},
+
+    # Rua 09 — Ímpar 21-103 (M) | Par 22-100 (M)
+    "Rua 09": {"tipo": "M",
+                "cols_impar": list(range(21, 104, 2)),
+                "cols_par":   list(range(22, 102, 2))},
+
+    # Rua 10 — Ímpar 21-103 (G) | Par 22-100 (G)
+    "Rua 10": {"tipo": "G",
+                "cols_impar": list(range(21, 104, 2)),
+                "cols_par":   list(range(22, 102, 2))},
+
+    # Rua 11 — Par 22-94 (G) unilateral + apêndice metal 129,131,133
+    "Rua 11": {"tipo": "G_Unilateral",
+                "cols_impar": [],
+                "cols_par":   list(range(22, 96, 2)),
+                "metal":      [129, 131, 133]},
+
     "Rua 12": {"tipo": "Inexistente", "cols_impar": [], "cols_par": []},
     "Rua 13": {"tipo": "Inexistente", "cols_impar": [], "cols_par": []},
-    # Rua 14 — seq: 1-23 madeira | 26-32 metal | 42-48 metal (24-25 e 33-41 não existem)
-    "Rua 14": {"tipo": "Especial_Rua_14", "cols_impar": [], "cols_par": [], "cols_seq": list(range(1, 24)) + list(range(26, 33)) + list(range(42, 49))},
-    # Rua 15 — Par 2-138(M) | Ímpar 1-87(M) + 89,91 madeira + 93 metal
-    "Rua 15": {"tipo": "Misto_Lado_15", "cols_par": list(range(2, 140, 2)), "cols_impar": list(range(1, 88, 2)), "madeira": [89, 91], "metal": [93]},
-    # Rua 16 — Par: 36,38,40 metal | 42-100 G | 102-140 M / Ímpar: 43 metal | 45-139 G(→M a partir 101)
-    "Rua 16": {"tipo": "G", "metal": [43], "metal_cols": [36, 38, 40], "cols_impar": list(range(45, 140, 2)), "cols_par": list(range(42, 142, 2))},
-    # Rua 17 — Ímpar 1-99(G) + 101,103,105 metal | Par 2-100(G) + 102,104,106 metal
-    "Rua 17": {"tipo": "G", "cols_impar": list(range(1, 100, 2)), "cols_par": list(range(2, 102, 2)), "metal": [101, 103, 105], "metal_cols": [102, 104, 106]},
-    # Rua 18 — Ímpar 35,37,39 metal + 41-139(M) | Par 36,38,40 metal + 42-140(M)
-    "Rua 18": {"tipo": "M", "cols_impar": list(range(41, 140, 2)), "cols_par": list(range(42, 142, 2)), "metal": [35, 37, 39], "metal_cols": [36, 38, 40]},
-    # Rua 19 — Ímpar 1-99(P) + 101,103,105 metal | Par 2-100(P) + 102,104,106 metal
-    "Rua 19": {"tipo": "P", "cols_impar": list(range(1, 100, 2)), "cols_par": list(range(2, 102, 2)), "metal": [101, 103, 105], "metal_cols": [102, 104, 106]},
-    # Rua 20 — APENAS ÍMPAR: 35,37,39 metal + 41-139(P)
-    "Rua 20": {"tipo": "Aramado_P_Seq_20", "cols_impar": [], "cols_par": [], "cols_seq": [35, 37, 39] + list(range(41, 140, 2)), "metal_cols": [35, 37, 39]},
+
+    # Rua 14 — seq: 1-23 madeira | 26-32 metal | 42-48 metal
+    "Rua 14": {"tipo": "Especial_Rua_14", "cols_impar": [], "cols_par": [],
+                "cols_seq": list(range(1, 24)) + list(range(26, 33)) + list(range(42, 49))},
+
+    # Rua 15 — Par 2-138 (M) | Ímpar 1-87 (M) + 89,91 madeira + 93 metal
+    "Rua 15": {"tipo": "Misto_Lado_15",
+                "cols_par":   list(range(2, 140, 2)),
+                "cols_impar": list(range(1, 88, 2)),
+                "madeira":    [89, 91],
+                "metal":      [93]},
+
+    # Rua 16 — Par: 36,38,40 metal | 42-100 G | 102-140 M
+    #           Ímpar: 43 metal | 45-139 G (inteiro, sem virar M)
+    "Rua 16": {"tipo": "G",
+                "metal":      [43],
+                "metal_cols": [36, 38, 40],
+                "cols_impar": list(range(45, 140, 2)),
+                "cols_par":   list(range(42, 142, 2))},
+
+    # Rua 17 — Ímpar 1-99 (G) + 101,103,105 metal | Par 2-100 (G) + 102,104,106 metal
+    "Rua 17": {"tipo": "G",
+                "cols_impar": list(range(1, 100, 2)),
+                "cols_par":   list(range(2, 102, 2)),
+                "metal":      [101, 103, 105],
+                "metal_cols": [102, 104, 106]},
+
+    # Rua 18 — Ímpar 35,37,39 metal + 41-139 (M) | Par 36,38,40 metal + 42-140 (M)
+    "Rua 18": {"tipo": "M",
+                "cols_impar": list(range(41, 140, 2)),
+                "cols_par":   list(range(42, 142, 2)),
+                "metal":      [35, 37, 39],
+                "metal_cols": [36, 38, 40]},
+
+    # Rua 19 — Ímpar 1-99 (P) + 101,103,105 metal | Par 2-100 (P) + 102,104,106 metal
+    "Rua 19": {"tipo": "P",
+                "cols_impar": list(range(1, 100, 2)),
+                "cols_par":   list(range(2, 102, 2)),
+                "metal":      [101, 103, 105],
+                "metal_cols": [102, 104, 106]},
+
+    # Rua 20 — APENAS ÍMPAR: 35,37,39 metal + 41-139 (P)
+    "Rua 20": {"tipo": "Aramado_P_Seq_20", "cols_impar": [], "cols_par": [],
+                "cols_seq":   [35, 37, 39] + list(range(41, 140, 2)),
+                "metal_cols": [35, 37, 39]},
+
     # Rua 21 — APENAS ÍMPAR: 1-77 metal sequencial
-    "Rua 21": {"tipo": "Metal_Seq_21", "cols_impar": [], "cols_par": [], "cols_seq": list(range(1, 78, 2))},
+    "Rua 21": {"tipo": "Metal_Seq_21", "cols_impar": [], "cols_par": [],
+                "cols_seq":   list(range(1, 78, 2))},
 }
 
 # Mapeamento de gênero por rua, conforme sua apresentação (slides "Estoque
@@ -267,26 +333,41 @@ def obter_chave_estoque(categoria_peca, estacao):
     return f"{categoria_peca}|{estacao}"
 
 def obter_lados_colunas_rua(r_nome, r_cfg):
-    """Retorna lista de (lado, colunas) cobrindo TODAS as posições da rua,
-    incluindo colunas especiais como madeira e metal isolados (ex: Rua 15).
-    Sem isso, posições que ficam só em 'madeira' ou 'metal' nunca entram
-    no base_dados_cd e somem do Visualizador."""
-    if "cols_seq" in r_cfg:
-        return [("seq", r_cfg["cols_seq"])]
-    lados = [
-        ("impar", r_cfg.get("cols_impar", [])),
-        ("par",   r_cfg.get("cols_par",   [])),
-    ]
-    # Colunas especiais que não estão em cols_impar nem cols_par
-    todas_normais = set(r_cfg.get("cols_impar", [])) | set(r_cfg.get("cols_par", []))
+    """Retorna lista de (lado, colunas) cobrindo TODAS as posições da rua.
+    Ruas que têm cols_impar/cols_par E cols_seq ao mesmo tempo (ex: Rua 02)
+    têm os três lados incluídos — não só o seq. Extras como madeira e metal
+    fora das listas normais também são incluídos."""
+    tipo = r_cfg.get("tipo", "")
+    if tipo in ("Inexistente", "Morta"):
+        return []
+
+    lados = []
+    normais = set()
+
+    # Sempre inclui ímpar e par quando existem
+    if r_cfg.get("cols_impar"):
+        lados.append(("impar", r_cfg["cols_impar"]))
+        normais.update(r_cfg["cols_impar"])
+    if r_cfg.get("cols_par"):
+        lados.append(("par", r_cfg["cols_par"]))
+        normais.update(r_cfg["cols_par"])
+
+    # Seq entra só para colunas que não estão em ímpar nem par
+    seq_extras = [c for c in r_cfg.get("cols_seq", []) if c not in normais]
+    if seq_extras:
+        lados.append(("seq", seq_extras))
+        normais.update(seq_extras)
+
+    # Colunas especiais (madeira/metal) fora de tudo que já foi incluído
     extras_impar = [c for c in r_cfg.get("madeira", []) + r_cfg.get("metal", [])
-                    if c not in todas_normais and c % 2 == 1]
+                    if c not in normais and c % 2 == 1]
     extras_par   = [c for c in r_cfg.get("madeira", []) + r_cfg.get("metal", [])
-                    if c not in todas_normais and c % 2 == 0]
+                    if c not in normais and c % 2 == 0]
     if extras_impar:
         lados.append(("impar", sorted(extras_impar)))
     if extras_par:
         lados.append(("par", sorted(extras_par)))
+
     return lados
 
 def obter_especificacao_casulo(rua_nome, coluna, lado="impar"):
