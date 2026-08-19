@@ -1682,27 +1682,40 @@ def extrair_baixas_romaneio_pdf(arquivo_pdf):
 
 def resolver_chave_por_endereco(rua_num, nivel, coluna):
     """
-    Resolve um endereço (número da rua + nível + coluna) pra chave de casulo,
-    reaproveitando a mesma lógica de determinação de lado usada na Consulta
-    Rápida de Casulos. Retorna (chave, erro) — chave vem None se erro != None.
+    Resolve um endereço (número da rua + nível + coluna) pra chave de casulo.
+    Retorna (chave, erro) — chave vem None se erro != None.
     """
     rua_alvo = f"Rua {rua_num:02d}"
     cfg = ESTRUTURA_CD.get(rua_alvo)
-    if not cfg or cfg.get("tipo") == "Inexistente":
+    if not cfg or cfg.get("tipo") in ("Inexistente", "Morta"):
         return None, f"{rua_alvo} não existe"
 
-    todos_da_rua = cfg.get("cols_impar", []) + cfg.get("cols_par", []) + cfg.get("cols_seq", [])
+    cols_impar = cfg.get("cols_impar", [])
+    cols_par   = cfg.get("cols_par", [])
+    cols_seq   = cfg.get("cols_seq", [])
+    madeira    = cfg.get("madeira", [])
+    metal      = cfg.get("metal", [])
+    metal_cols = cfg.get("metal_cols", [])
+
+    todos_da_rua = cols_impar + cols_par + cols_seq + madeira + metal + metal_cols
     if todos_da_rua and coluna not in todos_da_rua:
         return None, f"coluna {coluna:03d} não existe na {rua_alvo}"
 
-    if "cols_seq" in cfg:
-        lado = "seq"
-    elif rua_alvo == "Rua 11":
+    # Determina o lado — ordem de prioridade:
+    # 1. Rua 11 é sempre "par" (unilateral)
+    # 2. Coluna está explicitamente em cols_impar ou cols_par → usa esse lado
+    # 3. Coluna está em cols_seq (e NÃO está em cols_impar nem cols_par) → "seq"
+    # 4. Coluna especial (madeira/metal fora das listas normais) → por paridade
+    if rua_alvo == "Rua 11":
         lado = "par"
-    elif coluna in cfg.get("cols_impar", []):
+    elif coluna in cols_impar:
         lado = "impar"
-    elif coluna in cfg.get("cols_par", []):
+    elif coluna in cols_par:
         lado = "par"
+    elif coluna in cols_seq:
+        lado = "seq"
+    elif coluna in madeira or coluna in metal or coluna in metal_cols:
+        lado = "impar" if coluna % 2 == 1 else "par"
     else:
         return None, f"não consegui determinar o lado da coluna {coluna:03d}"
 
