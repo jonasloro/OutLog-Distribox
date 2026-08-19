@@ -396,6 +396,103 @@ def calcular_fracao_ocupada(dados_casulo, tipo_estrutural, rua_nome):
             fracao += qtd / cap_min
     return fracao
 
+def obter_capacidade_estimada_segura(tipo_estrutural, rua_nome):
+    """Igual obter_capacidade_estimada_exibicao, mas nunca deixa a
+    capacidade virar 0/None — cai num valor genérico (20) quando a
+    combinação de tipo/rua não tem nada cadastrado na tabela de capacidade.
+    Usado pelas posições que só existem no dado real da ID Brasil e ainda
+    não têm uma capacidade específica configurada."""
+    try:
+        valor = obter_capacidade_estimada_exibicao(tipo_estrutural, rua_nome)
+    except Exception:
+        valor = 0
+    return valor if valor and valor > 0 else 20
+
+def montar_html_nicho_id_brasil(rua_nome, coluna_num, nivel, quantidade):
+    """Mesma pintura visual do montar_html_nicho, mas pra uma posição que
+    vem direto do dado real da ID Brasil — não depende de a posição estar
+    numa lista pré-cadastrada de colunas/níveis válidos."""
+    lado = "impar" if coluna_num % 2 == 1 else "par"
+    spec = obter_especificacao_casulo(rua_nome, coluna_num, lado)
+    tipo_estrutural = spec.get("tipo_estrutural") or "aramado_P"
+    capacidade_estimada = obter_capacidade_estimada_segura(tipo_estrutural, rua_nome)
+    pct_ocupacao = (quantidade / capacidade_estimada * 100) if capacidade_estimada else 0.0
+
+    status = "livre"
+    if pct_ocupacao >= 81: status = "saturado"
+    elif pct_ocupacao >= 50: status = "atencao"
+
+    is_destaque = (
+        st.session_state.busca_destaque
+        and st.session_state.busca_destaque['rua'] == rua_nome
+        and st.session_state.busca_destaque['nivel'] == nivel
+        and st.session_state.busca_destaque['col'] == coluna_num
+    )
+    classe_destaque = "destaque-ativo" if is_destaque else ""
+
+    return (
+        f"<div class='nicho {status} {classe_destaque}' "
+        f"title='{coluna_num:03d}-{nivel} | {quantidade}/{capacidade_estimada} peças "
+        f"({pct_ocupacao:.1f}% da capacidade) | fonte: ID Brasil'>"
+        f"{quantidade}/{capacidade_estimada}</div>"
+    )
+
+def renderizar_visualizador_dinamico_id_brasil(rua_nome, grade_rua):
+    """Desenha a rua inteira a partir do dado real da ID Brasil: colunas e
+    níveis vêm do que realmente existe (grade_rua), não de uma lista
+    cadastrada à mão. Coluna ímpar cai no lado esquerdo, par no direito —
+    mesma convenção visual que o app já usava."""
+    colunas_presentes = sorted({col for (col, niv) in grade_rua.keys()})
+    niveis_presentes = sorted({niv for (col, niv) in grade_rua.keys()})
+
+    if not colunas_presentes:
+        st.info("Nenhuma posição sincronizada da ID Brasil para esta rua ainda.")
+        return
+
+    colunas_impares = [c for c in colunas_presentes if c % 2 == 1]
+    colunas_pares = [c for c in colunas_presentes if c % 2 == 0]
+
+    st.markdown(f"<p style='text-align:center; color:#8892b0; font-size:12px;'>Fonte: dado real sincronizado da ID Brasil — {len(colunas_presentes)} colunas, {len(niveis_presentes)} níveis distintos.</p>", unsafe_allow_html=True)
+
+    def renderizar_bloco(colunas_lado, titulo_lado, chave_col_widget):
+        st.markdown("<div class='lado-container'>", unsafe_allow_html=True)
+        st.markdown(f"<div class='lado-titulo'>{titulo_lado}</div>", unsafe_allow_html=True)
+        if not colunas_lado:
+            st.markdown("<p style='color: #8892b0; font-size: 12px; padding: 20px;'>Sem posições neste lado.</p>", unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+            return
+
+        colunas_exibidas = colunas_lado
+        if len(colunas_lado) > 20:
+            tamanho_bloco = 20
+            blocos = [
+                (f"Colunas {colunas_lado[i]:03d} até {colunas_lado[min(i+tamanho_bloco-1, len(colunas_lado)-1)]:03d}", colunas_lado[i:i+tamanho_bloco])
+                for i in range(0, len(colunas_lado), tamanho_bloco)
+            ]
+            opcoes_bloco = [b[0] for b in blocos]
+            bloco_escolhido = st.selectbox("Bloco de colunas:", opcoes_bloco, key=chave_col_widget)
+            colunas_exibidas = next(b[1] for b in blocos if b[0] == bloco_escolhido)
+
+        renderizar_cabecalho_colunas(colunas_exibidas)
+        for nivel in niveis_presentes:
+            grid = st.columns(len(colunas_exibidas) + 1)
+            with grid[0]:
+                st.markdown(f"<div style='line-height:28px; text-align:center; font-weight:bold; color:#8892b0; font-size: 10px;'>{nivel}</div>", unsafe_allow_html=True)
+            for idx, col_num in enumerate(colunas_exibidas):
+                with grid[idx + 1]:
+                    dado = grade_rua.get((col_num, nivel))
+                    if dado is None:
+                        st.markdown("<div class='nicho' style='background: transparent;'>-</div>", unsafe_allow_html=True)
+                    else:
+                        st.markdown(montar_html_nicho_id_brasil(rua_nome, col_num, nivel, dado["quantidade"]), unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    col_esq, col_dir = st.columns(2)
+    with col_esq:
+        renderizar_bloco(colunas_impares, "◀ Lado Ímpar", f"bloco_impar_{rua_nome}")
+    with col_dir:
+        renderizar_bloco(colunas_pares, "Lado Par ▶", f"bloco_par_{rua_nome}")
+
 def montar_html_nicho(rua_selecionada, col_num, nivel, spec, chave_lado):
     if nivel not in spec["niveis"]:
         return "<div class='nicho' style='background: transparent;'>-</div>"
@@ -693,6 +790,49 @@ def carregar_snapshot_id_brasil_do_banco():
         st.session_state.ultimo_erro_id_brasil = str(e)
         return None
     return {chave: int(qtd) for chave, qtd in linhas}
+
+def carregar_grade_id_brasil_do_banco():
+    """Carrega TODO o snapshot da ID Brasil, indexado por rua (no formato
+    interno 'Rua NN') -> {(coluna_int, linha): {"quantidade":..., "status":...}}.
+    Ao contrário de carregar_snapshot_id_brasil_do_banco, isso NÃO depende do
+    ESTRUTURA_CD pra decidir o que existe — usa exatamente as posições que a
+    ID Brasil informou, sem filtrar por faixa de coluna/nível conhecida.
+    Retorna None se o banco não estiver disponível."""
+    conn = obter_conexao_bd()
+    if conn is None:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT rua, linha, coluna, status, quantidade_itens FROM estoque_id_brasil")
+            linhas = cur.fetchall()
+        conn.close()
+    except Exception as e:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        st.session_state.ultimo_erro_id_brasil = str(e)
+        return None
+
+    grade = {}
+    for rua_txt, linha_txt, coluna_txt, status_txt, qtd in linhas:
+        try:
+            rua_num = int(rua_txt)
+            coluna_num = int(coluna_txt)
+        except (TypeError, ValueError):
+            continue
+        rua_nome = f"Rua {rua_num:02d}"
+        nivel = str(linha_txt).upper()
+        grade.setdefault(rua_nome, {})[(coluna_num, nivel)] = {
+            "quantidade": int(qtd or 0),
+            "status": str(status_txt or ""),
+        }
+    return grade
+
+# Ruas que a ID Brasil rastreia mas que ainda NÃO são casulos mapeados no
+# Visualizador (ex: porta-palete). Ficam de fora do modo dinâmico até serem
+# mapeadas — decisão tomada com você em 2026, não é esquecimento.
+RUAS_FORA_DO_VISUALIZADOR_ID_BRASIL = {"Rua 01"}
 
 def sincronizar_snapshot_completo_id_brasil():
     """Percorre TODAS as páginas de GET /casulo (só leitura), resolve a chave
@@ -1498,6 +1638,8 @@ if 'ultimo_payload_id_brasil' not in st.session_state:
     st.session_state.ultimo_payload_id_brasil = None
 if 'quantidades_id_brasil' not in st.session_state:
     st.session_state.quantidades_id_brasil = carregar_snapshot_id_brasil_do_banco() or {}
+if 'grade_id_brasil' not in st.session_state:
+    st.session_state.grade_id_brasil = carregar_grade_id_brasil_do_banco() or {}
 
 if 'busca_destaque' not in st.session_state:
     st.session_state.busca_destaque = None
@@ -2091,20 +2233,63 @@ st.markdown(f"""
 if st.session_state.aba_ativa_selecionada == "🏠 Tela Inicial (Geral)":
     st.markdown("<h3 style='text-align: center; color: #ffcc00;'>📊 Painel Geral de Ocupação</h3>", unsafe_allow_html=True)
 
+    def calcular_estatisticas_rua(rua_nome):
+        """Retorna (soma_fracoes, contagem, soma_pecas, casulos_livres) pra
+        uma rua. Usa a grade real da ID Brasil quando existir sincronização
+        pra essa rua (e ela não estiver na lista de exclusão); senão cai
+        pro lançamento manual, como o app sempre fez."""
+        grade_rua = st.session_state.grade_id_brasil.get(rua_nome)
+        if grade_rua and rua_nome not in RUAS_FORA_DO_VISUALIZADOR_ID_BRASIL:
+            soma_fracoes, soma_pecas, livres = 0.0, 0, 0
+            for (col_num, nivel), dado in grade_rua.items():
+                qtd = dado["quantidade"]
+                lado = "impar" if col_num % 2 == 1 else "par"
+                spec = obter_especificacao_casulo(rua_nome, col_num, lado)
+                tipo_estrutural = spec.get("tipo_estrutural") or "aramado_P"
+                capacidade = obter_capacidade_estimada_segura(tipo_estrutural, rua_nome)
+                soma_fracoes += (qtd / capacidade) if capacidade else 0.0
+                soma_pecas += qtd
+                if qtd == 0:
+                    livres += 1
+            return soma_fracoes, len(grade_rua), soma_pecas, livres
+
+        soma_fracoes, soma_pecas, livres, contagem = 0.0, 0, 0, 0
+        for chave, dados_casulo in st.session_state.base_dados_cd.items():
+            r_n, lado_r, c_r, n_r = chave.split("|")
+            if r_n == rua_nome:
+                l_param = "par" if rua_nome == "Rua 11" else ("impar" if lado_r == "seq" else lado_r)
+                spec_r = obter_especificacao_casulo(rua_nome, int(c_r), l_param)
+                soma_fracoes += calcular_fracao_ocupada(dados_casulo, spec_r["tipo_estrutural"], rua_nome)
+                pecas_casulo = calcular_pecas_totais(dados_casulo)
+                soma_pecas += pecas_casulo
+                contagem += 1
+                if pecas_casulo == 0:
+                    livres += 1
+        return soma_fracoes, contagem, soma_pecas, livres
+
+    def obter_classe_cor(pct):
+        if pct == 0: return "cor-verde"
+        elif pct < 50: return "cor-verde"
+        elif pct <= 80: return "cor-amarelo"
+        elif pct < 100: return "cor-laranja"
+        else: return "cor-vermelho"
+
+    ruas_nomes = [r for r in ESTRUTURA_CD.keys() if ESTRUTURA_CD[r].get("tipo") != "Inexistente"]
+
+    total_casulos = 0
     soma_fracoes_geral = 0.0
     total_pecas_atuais = 0
     casulos_livres = 0
-    total_casulos = len(st.session_state.base_dados_cd)
+    estatisticas_por_rua = []
 
-    for chave, dados_casulo in st.session_state.base_dados_cd.items():
-        r_nome, lado, c_str, n = chave.split("|")
-        l_param = "par" if r_nome == "Rua 11" else ("impar" if lado == "seq" else lado)
-        spec = obter_especificacao_casulo(r_nome, int(c_str), l_param)
-        pecas_casulo = calcular_pecas_totais(dados_casulo)
-        soma_fracoes_geral += calcular_fracao_ocupada(dados_casulo, spec["tipo_estrutural"], r_nome)
-        total_pecas_atuais += pecas_casulo
-        if pecas_casulo == 0:
-            casulos_livres += 1
+    for rua in ruas_nomes:
+        soma_fracoes_rua, contagem_rua, soma_pecas_rua, livres_rua = calcular_estatisticas_rua(rua)
+        pct_rua = (soma_fracoes_rua / contagem_rua * 100) if contagem_rua > 0 else 0.0
+        estatisticas_por_rua.append({"Rua": rua, "Ocupação (%)": round(pct_rua, 1)})
+        total_casulos += contagem_rua
+        soma_fracoes_geral += soma_fracoes_rua
+        total_pecas_atuais += soma_pecas_rua
+        casulos_livres += livres_rua
 
     pct_geral = (soma_fracoes_geral / total_casulos * 100) if total_casulos > 0 else 0.0
 
@@ -2117,34 +2302,14 @@ if st.session_state.aba_ativa_selecionada == "🏠 Tela Inicial (Geral)":
     st.write("---")
     st.markdown("<h4 style='text-align: center; color: #ffcc00;'>🗺️ Mapa de Calor por Rua</h4>", unsafe_allow_html=True)
 
-    def obter_classe_cor(pct):
-        if pct == 0: return "cor-verde"
-        elif pct < 50: return "cor-verde"
-        elif pct <= 80: return "cor-amarelo"
-        elif pct < 100: return "cor-laranja"
-        else: return "cor-vermelho"
-
-    ruas_nomes = [r for r in ESTRUTURA_CD.keys() if ESTRUTURA_CD[r].get("tipo") != "Inexistente"]
     bloco_cols = st.columns(3, gap="large")
-    dados_ranking = []
+    dados_ranking = estatisticas_por_rua
 
-    for idx, rua in enumerate(ruas_nomes):
+    for idx, item_rua in enumerate(estatisticas_por_rua):
+        rua = item_rua["Rua"]
+        pct_rua = item_rua["Ocupação (%)"]
         col_alvo = bloco_cols[idx % 3]
-        cfg_rua = ESTRUTURA_CD[rua]
-
-        soma_fracoes_rua = 0.0
-        contagem_rua = 0
-        for chave, dados_casulo in st.session_state.base_dados_cd.items():
-            r_n, lado_r, c_r, n_r = chave.split("|")
-            if r_n == rua:
-                l_param = "par" if rua == "Rua 11" else ("impar" if lado_r == "seq" else lado_r)
-                spec_r = obter_especificacao_casulo(rua, int(c_r), l_param)
-                soma_fracoes_rua += calcular_fracao_ocupada(dados_casulo, spec_r["tipo_estrutural"], rua)
-                contagem_rua += 1
-
-        pct_rua = (soma_fracoes_rua / contagem_rua * 100) if contagem_rua > 0 else 0.0
         classe_cor = obter_classe_cor(pct_rua)
-        dados_ranking.append({"Rua": rua, "Ocupação (%)": round(pct_rua, 1)})
 
         with col_alvo:
             st.markdown(f"""
@@ -2206,12 +2371,13 @@ elif st.session_state.aba_ativa_selecionada == "📦 Visualizador de Casulos":
                 )
             else:
                 st.session_state.quantidades_id_brasil = carregar_snapshot_id_brasil_do_banco() or {}
+                st.session_state.grade_id_brasil = carregar_grade_id_brasil_do_banco() or {}
                 st.success(
                     f"✅ Sincronizado! {resumo['total_lido']} de {resumo['total_api']} casulos lidos, "
                     f"{resumo['resolvidos']} associados a um casulo do sistema"
                     + (f" ({resumo['nao_resolvidos']} não encontraram correspondência)." if resumo['nao_resolvidos'] else ".")
                 )
-                st.rerun()
+                st.caption("A grade abaixo já está atualizada com esse resultado — não precisa recarregar a página.")
 
     lista_ruas = list(ESTRUTURA_CD.keys())
     rua_inicial_idx = 0
@@ -2245,7 +2411,15 @@ elif st.session_state.aba_ativa_selecionada == "📦 Visualizador de Casulos":
         </div>
         """, unsafe_allow_html=True)
 
-        if rua_selecionada == "Rua 14":
+        grade_rua_id_brasil = st.session_state.grade_id_brasil.get(rua_selecionada)
+        usar_modo_id_brasil = (
+            grade_rua_id_brasil
+            and rua_selecionada not in RUAS_FORA_DO_VISUALIZADOR_ID_BRASIL
+        )
+
+        if usar_modo_id_brasil:
+            renderizar_visualizador_dinamico_id_brasil(rua_selecionada, grade_rua_id_brasil)
+        elif rua_selecionada == "Rua 14":
             st.markdown("<p style='text-align:center; color:#8892b0; font-size:13px;'>Corredor segmentado por Tipologia Estrutural (Madeira e Metal)</p>", unsafe_allow_html=True)
 
             blocos_r14 = [
@@ -3017,6 +3191,7 @@ elif st.session_state.aba_ativa_selecionada == "📄 Importar Relatório de Esto
 # ==========================================
 elif st.session_state.aba_ativa_selecionada == "📥 Entrada de Dados / Abastecimento":
     st.markdown("<h3 style='text-align: center; color: #ffcc00;'>📥 Entrada de Dados por Categoria e Estação</h3>", unsafe_allow_html=True)
+    st.info("ℹ️ Desde a sincronização com a ID Brasil, o Visualizador e a Visão Geral já mostram o dado real automaticamente pras ruas sincronizadas. Esta tela continua útil como plano B — pra qualquer rua que ainda não tenha sincronização (ex: Rua 01, hoje em porta-palete).")
     st.markdown(f"<p style='color: #8892b0; text-align: center;'>Cada lançamento marca a peça com uma categoria (do tipo Regatas/Bodys/Tops até Jaquetas Pesadas) e uma estação. Estoques de estações diferentes convivem no mesmo casulo.</p>", unsafe_allow_html=True)
 
     with st.expander("📋 Ver tabela de capacidade (Verão / Inverno)"):
