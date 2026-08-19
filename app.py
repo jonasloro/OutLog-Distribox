@@ -87,7 +87,7 @@ ESTRUTURA_CD_PADRAO = {
     "Rua 13": {"tipo": "Inexistente", "cols_impar": [], "cols_par": []},
     "Rua 14": {"tipo": "Especial_Rua_14", "cols_impar": [], "cols_par": [], "cols_seq": list(range(1, 32)) + list(range(42, 49))},
     "Rua 15": {"tipo": "Misto_Lado_15", "cols_impar": list(range(1, 88, 2)), "cols_par": list(range(2, 139, 2))},
-    "Rua 16": {"tipo": "G", "metal": [43], "cols_impar": list(range(1, 101, 2)), "cols_par": list(range(2, 102, 2))},
+    "Rua 16": {"tipo": "G", "metal": [43], "cols_impar": list(range(1, 141, 2)), "cols_par": list(range(2, 142, 2))},
     "Rua 17": {"tipo": "G", "metal": [101, 102, 103, 104, 105, 106], "cols_impar": list(range(1, 115, 2)), "cols_par": list(range(2, 116, 2))},
     "Rua 18": {"tipo": "M", "metal": [35, 36, 37, 38, 39, 40], "cols_impar": list(range(1, 81, 2)), "cols_par": list(range(2, 82, 2))},
     "Rua 19": {"tipo": "P", "metal": [101, 102, 103, 104, 105, 106], "cols_impar": list(range(1, 115, 2)), "cols_par": list(range(2, 116, 2))},
@@ -276,6 +276,10 @@ def obter_especificacao_casulo(rua_nome, coluna, lado="impar"):
     if tipo in ("Aramado_P_Seq_20", "P"):
         return {"niveis": NIVEIS_P, "tipo_estrutural": "aramado_P", "tipo_desc": "Pequeno (P)"}
     elif tipo == "G":
+        # Caso especial: na Rua 16, a partir da coluna 101 os casulos viraram
+        # M (não mais G) — decisão confirmada com você.
+        if rua_nome == "Rua 16" and col >= 101:
+            return {"niveis": NIVEIS_M, "tipo_estrutural": "aramado_M", "tipo_desc": "Médio (M) — Rua 16, a partir da coluna 101"}
         return {"niveis": NIVEIS_G, "tipo_estrutural": "aramado_G", "tipo_desc": "Grande (G)"}
     elif tipo == "M":
         return {"niveis": NIVEIS_M, "tipo_estrutural": "aramado_M", "tipo_desc": "Médio (M)"}
@@ -833,6 +837,15 @@ def carregar_grade_id_brasil_do_banco():
 # Visualizador (ex: porta-palete). Ficam de fora do modo dinâmico até serem
 # mapeadas — decisão tomada com você em 2026, não é esquecimento.
 RUAS_FORA_DO_VISUALIZADOR_ID_BRASIL = {"Rua 01"}
+
+# Decisão sua: manter SEMPRE a estrutura cadastrada (ESTRUTURA_CD) como
+# fonte do layout (colunas/níveis/lado) — a ID Brasil só entra como
+# QUANTIDADE real dentro dessa estrutura (via quantidades_id_brasil em
+# montar_html_nicho), nunca como fonte do próprio layout. A grade genérica
+# "tudo junto" (140 colunas x 22 níveis iguais pra toda rua) fica desligada
+# até você corrigir o ESTRUTURA_CD pra bater com a planta física real —
+# então isso é False por enquanto, de propósito.
+USAR_GRADE_DINAMICA_ID_BRASIL = False
 
 def sincronizar_snapshot_completo_id_brasil():
     """Percorre TODAS as páginas de GET /casulo (só leitura), resolve a chave
@@ -2239,7 +2252,7 @@ if st.session_state.aba_ativa_selecionada == "🏠 Tela Inicial (Geral)":
         pra essa rua (e ela não estiver na lista de exclusão); senão cai
         pro lançamento manual, como o app sempre fez."""
         grade_rua = st.session_state.grade_id_brasil.get(rua_nome)
-        if grade_rua and rua_nome not in RUAS_FORA_DO_VISUALIZADOR_ID_BRASIL:
+        if USAR_GRADE_DINAMICA_ID_BRASIL and grade_rua and rua_nome not in RUAS_FORA_DO_VISUALIZADOR_ID_BRASIL:
             soma_fracoes, soma_pecas, livres = 0.0, 0, 0
             for (col_num, nivel), dado in grade_rua.items():
                 qtd = dado["quantidade"]
@@ -2413,7 +2426,8 @@ elif st.session_state.aba_ativa_selecionada == "📦 Visualizador de Casulos":
 
         grade_rua_id_brasil = st.session_state.grade_id_brasil.get(rua_selecionada)
         usar_modo_id_brasil = (
-            grade_rua_id_brasil
+            USAR_GRADE_DINAMICA_ID_BRASIL
+            and grade_rua_id_brasil
             and rua_selecionada not in RUAS_FORA_DO_VISUALIZADOR_ID_BRASIL
         )
 
