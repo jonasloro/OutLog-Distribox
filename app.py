@@ -266,6 +266,29 @@ def obter_chave_casulo(rua_nome, lado, coluna, nivel):
 def obter_chave_estoque(categoria_peca, estacao):
     return f"{categoria_peca}|{estacao}"
 
+def obter_lados_colunas_rua(r_nome, r_cfg):
+    """Retorna lista de (lado, colunas) cobrindo TODAS as posições da rua,
+    incluindo colunas especiais como madeira e metal isolados (ex: Rua 15).
+    Sem isso, posições que ficam só em 'madeira' ou 'metal' nunca entram
+    no base_dados_cd e somem do Visualizador."""
+    if "cols_seq" in r_cfg:
+        return [("seq", r_cfg["cols_seq"])]
+    lados = [
+        ("impar", r_cfg.get("cols_impar", [])),
+        ("par",   r_cfg.get("cols_par",   [])),
+    ]
+    # Colunas especiais que não estão em cols_impar nem cols_par
+    todas_normais = set(r_cfg.get("cols_impar", [])) | set(r_cfg.get("cols_par", []))
+    extras_impar = [c for c in r_cfg.get("madeira", []) + r_cfg.get("metal", [])
+                    if c not in todas_normais and c % 2 == 1]
+    extras_par   = [c for c in r_cfg.get("madeira", []) + r_cfg.get("metal", [])
+                    if c not in todas_normais and c % 2 == 0]
+    if extras_impar:
+        lados.append(("impar", sorted(extras_impar)))
+    if extras_par:
+        lados.append(("par", sorted(extras_par)))
+    return lados
+
 def obter_especificacao_casulo(rua_nome, coluna, lado="impar"):
     """
     Retorna a especificação física de uma coluna/lado de uma rua: níveis
@@ -1030,9 +1053,7 @@ def _aplicar_configuracoes_do_banco(linhas_estrutura, linhas_capacidade, linhas_
             for r_nome, r_cfg in ESTRUTURA_CD.items():
                 if r_cfg.get("tipo") in ("Inexistente", "Morta"):
                     continue
-                lista_lados = [("impar", r_cfg.get("cols_impar", [])), ("par", r_cfg.get("cols_par", []))]
-                if "cols_seq" in r_cfg:
-                    lista_lados = [("seq", r_cfg["cols_seq"])]
+                lista_lados = obter_lados_colunas_rua(r_nome, r_cfg)
                 for lado, cols in lista_lados:
                     for c in cols:
                         l_param = "par" if r_nome == "Rua 11" else ("impar" if lado == "seq" else lado)
@@ -1699,11 +1720,9 @@ if 'base_dados_cd' not in st.session_state:
     estoque_persistido = carregar_estoque_do_banco()
     st.session_state.base_dados_cd = {}
     for r_nome, r_cfg in ESTRUTURA_CD.items():
-        if r_cfg.get("tipo") == "Inexistente":
+        if r_cfg.get("tipo") in ("Inexistente", "Morta"):
             continue
-        lista_lados = [("impar", r_cfg.get("cols_impar", [])), ("par", r_cfg.get("cols_par", []))]
-        if "cols_seq" in r_cfg:
-            lista_lados = [("seq", r_cfg["cols_seq"])]
+        lista_lados = obter_lados_colunas_rua(r_nome, r_cfg)
 
         for lado, cols in lista_lados:
             for c in cols:
@@ -3105,12 +3124,10 @@ elif st.session_state.aba_ativa_selecionada == "📊 Estatísticas de Casulos":
 
     linhas_detalhe = []
     for rua_nome_est, cfg_est in ESTRUTURA_CD.items():
-        if cfg_est.get("tipo") == "Inexistente":
+        if cfg_est.get("tipo") in ("Inexistente", "Morta"):
             continue
         contagem_rua_tipo = {}
-        lista_lados_est = [("impar", cfg_est.get("cols_impar", [])), ("par", cfg_est.get("cols_par", []))]
-        if "cols_seq" in cfg_est:
-            lista_lados_est = [("seq", cfg_est["cols_seq"])]
+        lista_lados_est = obter_lados_colunas_rua(rua_nome_est, cfg_est)
         for lado_est, cols_est in lista_lados_est:
             for c_est in cols_est:
                 l_param_est = "par" if rua_nome_est == "Rua 11" else ("impar" if lado_est == "seq" else lado_est)
