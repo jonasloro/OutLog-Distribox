@@ -73,27 +73,46 @@ st.set_page_config(
 # ==========================================
 
 ESTRUTURA_CD_PADRAO = {
+    # Rua 01 — porta-palete, fora do scope do Visualizador por ora
     "Rua 01": {"tipo": "Morta", "cols_impar": [], "cols_par": []},
-    "Rua 02": {"tipo": "Misto_Transicao", "cols_impar": list(range(21, 94, 2)), "cols_par": list(range(22, 103, 2)) + list(range(103, 141))},
-    "Rua 03": {"tipo": "P", "cols_impar": list(range(1, 101, 2)), "cols_par": list(range(2, 102, 2))},
-    "Rua 04": {"tipo": "Misto_Lado", "cols_impar": list(range(1, 101, 2)), "cols_par": list(range(2, 102, 2))},
-    "Rua 05": {"tipo": "M", "cols_impar": list(range(21, 101, 2)), "cols_par": list(range(22, 103, 2))},
-    "Rua 06": {"tipo": "M", "cols_impar": list(range(1, 82, 2)), "cols_par": list(range(2, 83, 2))},
-    "Rua 07": {"tipo": "M", "cols_impar": list(range(59, 140, 2)), "cols_par": list(range(60, 141, 2))},
-    "Rua 08": {"tipo": "M", "cols_impar": list(range(1, 82, 2)), "cols_par": list(range(2, 83, 2))},
-    "Rua 09": {"tipo": "M", "cols_impar": list(range(21, 104, 2)), "cols_par": list(range(22, 101, 2))},
-    "Rua 10": {"tipo": "G", "cols_impar": list(range(21, 104, 2)), "cols_par": list(range(22, 103, 2))},
-    "Rua 11": {"tipo": "G_Unilateral", "cols_impar": [], "cols_par": list(range(22, 95, 2))},
+    # Rua 02 — Par 22-102(P) | Ímpar 21-93(P) | Seq 103-139(G)
+    "Rua 02": {"tipo": "Misto_Transicao_R02", "cols_par": list(range(22, 104, 2)), "cols_impar": list(range(21, 94, 2)), "cols_seq": list(range(103, 140))},
+    # Rua 03 — Par 22-102(P) | Ímpar 19-103(P)
+    "Rua 03": {"tipo": "P", "cols_par": list(range(22, 104, 2)), "cols_impar": list(range(19, 104, 2))},
+    # Rua 04 — Ímpar 21-105(P) | Par 22-100(G)
+    "Rua 04": {"tipo": "Misto_Lado", "cols_impar": list(range(21, 106, 2)), "cols_par": list(range(22, 102, 2))},
+    # Rua 05 — Ímpar 21-101(M) | Par 22-100(M)
+    "Rua 05": {"tipo": "M", "cols_impar": list(range(21, 102, 2)), "cols_par": list(range(22, 102, 2))},
+    # Rua 06 — Ímpar 1-81(M) | Par 2-82(M)
+    "Rua 06": {"tipo": "M", "cols_impar": list(range(1, 82, 2)), "cols_par": list(range(2, 84, 2))},
+    # Rua 07 — Ímpar 59-139(M) | Par 60-140(M)
+    "Rua 07": {"tipo": "M", "cols_impar": list(range(59, 140, 2)), "cols_par": list(range(60, 142, 2))},
+    # Rua 08 — Ímpar 1-81(M) | Par 2-80(M)
+    "Rua 08": {"tipo": "M", "cols_impar": list(range(1, 82, 2)), "cols_par": list(range(2, 82, 2))},
+    # Rua 09 — Ímpar 21-103(M) | Par 22-100(M)
+    "Rua 09": {"tipo": "M", "cols_impar": list(range(21, 104, 2)), "cols_par": list(range(22, 102, 2))},
+    # Rua 10 — Ímpar 21-103(G) | Par 22-100(G)
+    "Rua 10": {"tipo": "G", "cols_impar": list(range(21, 104, 2)), "cols_par": list(range(22, 102, 2))},
+    # Rua 11 — Par 22-94(G) unilateral + apêndice metal 129,131,133
+    "Rua 11": {"tipo": "G_Unilateral", "cols_impar": [], "cols_par": list(range(22, 96, 2)), "metal": [129, 131, 133]},
     "Rua 12": {"tipo": "Inexistente", "cols_impar": [], "cols_par": []},
     "Rua 13": {"tipo": "Inexistente", "cols_impar": [], "cols_par": []},
-    "Rua 14": {"tipo": "Especial_Rua_14", "cols_impar": [], "cols_par": [], "cols_seq": list(range(1, 32)) + list(range(42, 49))},
-    "Rua 15": {"tipo": "Misto_Lado_15", "cols_impar": list(range(1, 88, 2)), "cols_par": list(range(2, 139, 2))},
-    "Rua 16": {"tipo": "G", "metal": [43], "cols_impar": list(range(1, 141, 2)), "cols_par": list(range(2, 142, 2))},
-    "Rua 17": {"tipo": "G", "metal": [101, 102, 103, 104, 105, 106], "cols_impar": list(range(1, 115, 2)), "cols_par": list(range(2, 116, 2))},
-    "Rua 18": {"tipo": "M", "metal": [35, 36, 37, 38, 39, 40], "cols_impar": list(range(1, 81, 2)), "cols_par": list(range(2, 82, 2))},
-    "Rua 19": {"tipo": "P", "metal": [101, 102, 103, 104, 105, 106], "cols_impar": list(range(1, 115, 2)), "cols_par": list(range(2, 116, 2))},
-    "Rua 20": {"tipo": "Aramado_P_Seq_20", "metal_cols": [35, 37, 39], "cols_impar": [], "cols_par": [], "cols_seq": list(range(35, 138, 2))},
-    "Rua 21": {"tipo": "Metal_Seq_21", "cols_impar": [], "cols_par": [], "cols_seq": list(range(1, 78, 2))}
+    # Rua 14 — seq: 1-23 madeira | 26-32 metal | 42-48 metal (24-25 e 33-41 não existem)
+    "Rua 14": {"tipo": "Especial_Rua_14", "cols_impar": [], "cols_par": [], "cols_seq": list(range(1, 24)) + list(range(26, 33)) + list(range(42, 49))},
+    # Rua 15 — Par 2-138(M) | Ímpar 1-87(M) + 89,91 madeira + 93 metal
+    "Rua 15": {"tipo": "Misto_Lado_15", "cols_par": list(range(2, 140, 2)), "cols_impar": list(range(1, 88, 2)), "madeira": [89, 91], "metal": [93]},
+    # Rua 16 — Par: 36,38,40 metal | 42-100 G | 102-140 M / Ímpar: 43 metal | 45-139 G(→M a partir 101)
+    "Rua 16": {"tipo": "G", "metal": [43], "metal_cols": [36, 38, 40], "cols_impar": list(range(45, 140, 2)), "cols_par": list(range(42, 142, 2))},
+    # Rua 17 — Ímpar 1-99(G) + 101,103,105 metal | Par 2-100(G) + 102,104,106 metal
+    "Rua 17": {"tipo": "G", "cols_impar": list(range(1, 100, 2)), "cols_par": list(range(2, 102, 2)), "metal": [101, 103, 105], "metal_cols": [102, 104, 106]},
+    # Rua 18 — Ímpar 35,37,39 metal + 41-139(M) | Par 36,38,40 metal + 42-140(M)
+    "Rua 18": {"tipo": "M", "cols_impar": list(range(41, 140, 2)), "cols_par": list(range(42, 142, 2)), "metal": [35, 37, 39], "metal_cols": [36, 38, 40]},
+    # Rua 19 — Ímpar 1-99(P) + 101,103,105 metal | Par 2-100(P) + 102,104,106 metal
+    "Rua 19": {"tipo": "P", "cols_impar": list(range(1, 100, 2)), "cols_par": list(range(2, 102, 2)), "metal": [101, 103, 105], "metal_cols": [102, 104, 106]},
+    # Rua 20 — APENAS ÍMPAR: 35,37,39 metal + 41-139(P)
+    "Rua 20": {"tipo": "Aramado_P_Seq_20", "cols_impar": [], "cols_par": [], "cols_seq": [35, 37, 39] + list(range(41, 140, 2)), "metal_cols": [35, 37, 39]},
+    # Rua 21 — APENAS ÍMPAR: 1-77 metal sequencial
+    "Rua 21": {"tipo": "Metal_Seq_21", "cols_impar": [], "cols_par": [], "cols_seq": list(range(1, 78, 2))},
 }
 
 # Mapeamento de gênero por rua, conforme sua apresentação (slides "Estoque
@@ -262,59 +281,68 @@ def obter_especificacao_casulo(rua_nome, coluna, lado="impar"):
     tipo = config.get("tipo", "")
     vazio = {"niveis": [], "tipo_estrutural": None, "tipo_desc": "Inexistente"}
 
-    if tipo == "Inexistente":
+    if tipo in ("Inexistente", "Morta"):
         return vazio
 
-    is_metal = False
+    # Metal tem prioridade sobre qualquer tipo estrutural
     if "metal" in config and col in config["metal"]:
-        is_metal = True
+        return {"niveis": NIVEIS_METAL_5, "tipo_estrutural": "metal_raso", "tipo_desc": "Metal"}
     if "metal_cols" in config and col in config["metal_cols"]:
-        is_metal = True
+        return {"niveis": NIVEIS_METAL_5, "tipo_estrutural": "metal_raso", "tipo_desc": "Metal"}
 
-    if is_metal:
-        return {"niveis": NIVEIS_METAL_5, "tipo_estrutural": "metal_raso", "tipo_desc": "Metal Infiltrado"}
+    # Madeira (Rua 15: cols 89, 91)
+    if "madeira" in config and col in config["madeira"]:
+        return {"niveis": ["D", "G", "J", "M", "P"], "tipo_estrutural": "madeira", "tipo_desc": "Madeira"}
 
     if tipo in ("Aramado_P_Seq_20", "P"):
         return {"niveis": NIVEIS_P, "tipo_estrutural": "aramado_P", "tipo_desc": "Pequeno (P)"}
+
     elif tipo == "G":
-        # Caso especial: na Rua 16, a partir da coluna 101 os casulos viraram
-        # M (não mais G) — decisão confirmada com você.
+        # Rua 16: a partir da col 101 os casulos viraram M
         if rua_nome == "Rua 16" and col >= 101:
-            return {"niveis": NIVEIS_M, "tipo_estrutural": "aramado_M", "tipo_desc": "Médio (M) — Rua 16, a partir da coluna 101"}
+            return {"niveis": NIVEIS_M, "tipo_estrutural": "aramado_M", "tipo_desc": "Médio (M)"}
         return {"niveis": NIVEIS_G, "tipo_estrutural": "aramado_G", "tipo_desc": "Grande (G)"}
+
     elif tipo == "M":
         return {"niveis": NIVEIS_M, "tipo_estrutural": "aramado_M", "tipo_desc": "Médio (M)"}
+
     elif tipo == "G_Unilateral":
         if lado == "par":
-            return {"niveis": NIVEIS_G, "tipo_estrutural": "aramado_G", "tipo_desc": "Grande (G) - Unilateral"}
-        else:
-            return vazio
+            return {"niveis": NIVEIS_G, "tipo_estrutural": "aramado_G", "tipo_desc": "Grande (G) — Unilateral"}
+        return vazio
+
     elif tipo == "Metal_Seq_21":
-        return {"niveis": NIVEIS_METAL_5, "tipo_estrutural": "metal_raso", "tipo_desc": "Metal Sequencial Rua 21"}
+        return {"niveis": NIVEIS_METAL_5, "tipo_estrutural": "metal_raso", "tipo_desc": "Metal Sequencial"}
+
     elif tipo == "Especial_Rua_14":
         if 1 <= col <= 23:
-            return {"niveis": ["D", "G", "J", "M", "P"], "tipo_estrutural": "madeira", "tipo_desc": "Rua 14 - Madeira Gigante"}
-        elif 24 <= col <= 31:
-            return {"niveis": NIVEIS_METAL_5, "tipo_estrutural": "metal_profundo", "tipo_desc": "Rua 14 - Metal Profundo"}
-        elif 42 <= col <= 48:
-            return {"niveis": NIVEIS_METAL_5, "tipo_estrutural": "metal_raso", "tipo_desc": "Rua 14 - Metal Raso"}
-        else:
-            return vazio
+            return {"niveis": ["D", "G", "J", "M", "P"], "tipo_estrutural": "madeira", "tipo_desc": "Rua 14 — Madeira Gigante"}
+        elif col in range(26, 33):
+            return {"niveis": NIVEIS_METAL_5, "tipo_estrutural": "metal_profundo", "tipo_desc": "Rua 14 — Metal Profundo"}
+        elif col in range(42, 49):
+            return {"niveis": NIVEIS_METAL_5, "tipo_estrutural": "metal_raso", "tipo_desc": "Rua 14 — Metal Raso"}
+        return vazio
+
+    elif tipo == "Misto_Transicao_R02":
+        # Ímpar 21-93 e par 22-102 → P; seq 103-139 → G
+        if col >= 103:
+            return {"niveis": NIVEIS_G, "tipo_estrutural": "aramado_G", "tipo_desc": "Grande (G)"}
+        return {"niveis": NIVEIS_P, "tipo_estrutural": "aramado_P", "tipo_desc": "Pequeno (P)"}
+
     elif tipo == "Misto_Transicao":
+        # Compatibilidade com dados antigos no Supabase
         if col < 103:
             return {"niveis": NIVEIS_P, "tipo_estrutural": "aramado_P", "tipo_desc": "Pequeno (P)"}
-        else:
-            return {"niveis": NIVEIS_G, "tipo_estrutural": "aramado_G", "tipo_desc": "Grande (G)"}
+        return {"niveis": NIVEIS_G, "tipo_estrutural": "aramado_G", "tipo_desc": "Grande (G)"}
+
     elif tipo == "Misto_Lado":
         if lado == "par":
             return {"niveis": NIVEIS_G, "tipo_estrutural": "aramado_G", "tipo_desc": "Grande (G)"}
-        else:
-            return {"niveis": NIVEIS_P, "tipo_estrutural": "aramado_P", "tipo_desc": "Pequeno (P)"}
+        return {"niveis": NIVEIS_P, "tipo_estrutural": "aramado_P", "tipo_desc": "Pequeno (P)"}
+
     elif tipo == "Misto_Lado_15":
-        if lado == "par":
-            return {"niveis": NIVEIS_M, "tipo_estrutural": "aramado_M", "tipo_desc": "Médio (M)"}
-        else:
-            return {"niveis": NIVEIS_G, "tipo_estrutural": "aramado_G", "tipo_desc": "Grande (G)"}
+        # Par → M | Ímpar 1-87 → M | 89,91 madeira e 93 metal já tratados acima
+        return {"niveis": NIVEIS_M, "tipo_estrutural": "aramado_M", "tipo_desc": "Médio (M)"}
 
     return {"niveis": NIVEIS_P, "tipo_estrutural": "aramado_P", "tipo_desc": "Padrão"}
 
@@ -994,6 +1022,26 @@ def _aplicar_configuracoes_do_banco(linhas_estrutura, linhas_capacidade, linhas_
     if estrutura_nova:
         ESTRUTURA_CD = estrutura_nova
         RUA_GENERO = genero_novo
+        # Reconstruir base_dados_cd para refletir a nova estrutura —
+        # sem isso o Visualizador mostraria chaves antigas de ruas/colunas
+        # que não existem mais, ou não mostraria casulos novos.
+        if "base_dados_cd" in st.session_state:
+            novo_base = {}
+            for r_nome, r_cfg in ESTRUTURA_CD.items():
+                if r_cfg.get("tipo") in ("Inexistente", "Morta"):
+                    continue
+                lista_lados = [("impar", r_cfg.get("cols_impar", [])), ("par", r_cfg.get("cols_par", []))]
+                if "cols_seq" in r_cfg:
+                    lista_lados = [("seq", r_cfg["cols_seq"])]
+                for lado, cols in lista_lados:
+                    for c in cols:
+                        l_param = "par" if r_nome == "Rua 11" else ("impar" if lado == "seq" else lado)
+                        spec = obter_especificacao_casulo(r_nome, c, l_param)
+                        for n in spec["niveis"]:
+                            chave = obter_chave_casulo(r_nome, lado, c, n)
+                            # Preserva estoque existente, cria vazio para novos casulos
+                            novo_base[chave] = st.session_state.base_dados_cd.get(chave, {})
+            st.session_state.base_dados_cd = novo_base
 
     tabelas = {
         "Feminino": {"Verão": {}, "Inverno": {}, "Meia-Estação": {}},
