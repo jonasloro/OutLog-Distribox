@@ -321,8 +321,9 @@ def obter_especificacao_casulo(rua_nome, coluna, lado="impar"):
         return {"niveis": NIVEIS_P, "tipo_estrutural": "aramado_P", "tipo_desc": "Pequeno (P)"}
 
     elif tipo == "G":
-        # Rua 16: a partir da col 101 os casulos viraram M
-        if rua_nome == "Rua 16" and col >= 101:
+        # Rua 16: lado ÍMPAR é G o tempo todo (45-139).
+        # Só o lado PAR vira M a partir da col 102.
+        if rua_nome == "Rua 16" and lado == "par" and col >= 102:
             return {"niveis": NIVEIS_M, "tipo_estrutural": "aramado_M", "tipo_desc": "Médio (M)"}
         return {"niveis": NIVEIS_G, "tipo_estrutural": "aramado_G", "tipo_desc": "Grande (G)"}
 
