@@ -401,10 +401,21 @@ def montar_html_nicho(rua_selecionada, col_num, nivel, spec, chave_lado):
         return "<div class='nicho' style='background: transparent;'>-</div>"
 
     chave = obter_chave_casulo(rua_selecionada, chave_lado, col_num, nivel)
-    dados_casulo = st.session_state.base_dados_cd.get(chave, {})
-    pecas_atuais = calcular_pecas_totais(dados_casulo)
     capacidade_estimada = obter_capacidade_estimada_exibicao(spec["tipo_estrutural"], rua_selecionada)
-    pct_ocupacao = calcular_fracao_ocupada(dados_casulo, spec["tipo_estrutural"], rua_selecionada) * 100
+
+    qtd_id_brasil = st.session_state.quantidades_id_brasil.get(chave)
+    if qtd_id_brasil is not None:
+        # Fonte real (ID Brasil): só temos o total por casulo, sem separar
+        # categoria/estação, então a % aqui é uma conta simples (total ÷
+        # capacidade) — provisório até o motor de capacidade ser refeito.
+        pecas_atuais = qtd_id_brasil
+        pct_ocupacao = (pecas_atuais / capacidade_estimada * 100) if capacidade_estimada else 0.0
+        fonte_txt = " | fonte: ID Brasil"
+    else:
+        dados_casulo = st.session_state.base_dados_cd.get(chave, {})
+        pecas_atuais = calcular_pecas_totais(dados_casulo)
+        pct_ocupacao = calcular_fracao_ocupada(dados_casulo, spec["tipo_estrutural"], rua_selecionada) * 100
+        fonte_txt = " | fonte: lançamento manual"
 
     status = "livre"
     if pct_ocupacao >= 100: status = "saturado"
@@ -414,7 +425,7 @@ def montar_html_nicho(rua_selecionada, col_num, nivel, spec, chave_lado):
     is_destaque = (st.session_state.busca_destaque and st.session_state.busca_destaque['rua'] == rua_selecionada and st.session_state.busca_destaque['nivel'] == nivel and st.session_state.busca_destaque['col'] == col_num)
     classe_destaque = "destaque-ativo" if is_destaque else ""
 
-    return f"<div class='nicho {status} {classe_destaque}' title='{col_num:03d}-{nivel} | {pecas_atuais}/{capacidade_estimada} peças ({pct_ocupacao:.1f}% da capacidade)'>{pecas_atuais}/{capacidade_estimada}</div>"
+    return f"<div class='nicho {status} {classe_destaque}' title='{col_num:03d}-{nivel} | {pecas_atuais}/{capacidade_estimada} peças ({pct_ocupacao:.1f}% da capacidade){fonte_txt}'>{pecas_atuais}/{capacidade_estimada}</div>"
 
 def renderizar_cabecalho_colunas(lista_colunas):
     grid_header = st.columns(len(lista_colunas) + 1)
@@ -563,7 +574,7 @@ def _obter_config_id_brasil():
     )
     return None
 
-def _chamar_api_id_brasil(rota, params=None):
+def _chamar_api_id_brasil(rota, params=None, log_visivel=True):
     """Faz UM ÚNICO tipo de chamada à API ID Brasil: um GET autenticado via
     HTTP Basic numa rota relativa à base_url (ex: 'casulo', 'casulo/total').
     Retorna o JSON decodificado (dict/list) em caso de sucesso, ou None em
@@ -582,9 +593,10 @@ def _chamar_api_id_brasil(rota, params=None):
         return None
 
     url = f"{cfg['base_url']}/{rota.lstrip('/')}"
-    # Log visível na tela — assim dá pra conferir, a cada clique, que a
-    # chamada é sempre um GET e pra onde ela está indo (sem expor a senha).
-    st.caption(f"🔎 Chamando: **GET** `{url}` (params={params})")
+    if log_visivel:
+        # Log visível na tela — assim dá pra conferir, a cada clique, que a
+        # chamada é sempre um GET e pra onde ela está indo (sem expor a senha).
+        st.caption(f"🔎 Chamando: **GET** `{url}` (params={params})")
     try:
         resposta = requests.get(
             url,
@@ -592,7 +604,8 @@ def _chamar_api_id_brasil(rota, params=None):
             params=params,
             timeout=20,
         )
-        st.caption(f"↩️ Método realmente enviado pelo servidor HTTP: **{resposta.request.method}** — status {resposta.status_code}")
+        if log_visivel:
+            st.caption(f"↩️ Método realmente enviado pelo servidor HTTP: **{resposta.request.method}** — status {resposta.status_code}")
         resposta.raise_for_status()
         st.session_state.ultimo_erro_id_brasil = None
         return resposta.json()
@@ -604,16 +617,141 @@ def _chamar_api_id_brasil(rota, params=None):
         st.session_state.ultimo_erro_id_brasil = f"resposta da API ID Brasil ({rota}) não é JSON válido: {e}"
         return None
 
-def consultar_casulos_id_brasil(offset=0):
-    """GET /casulo?offset=... — posições de estoque, uma página por vez.
-    Ainda não sabemos o tamanho de página nem os nomes dos campos, então por
-    enquanto isso só devolve o payload cru para inspeção."""
-    return _chamar_api_id_brasil("casulo", params={"offset": offset})
+def consultar_casulos_id_brasil(offset=0, log_visivel=True):
+    """GET /casulo?offset=... — posições de estoque, uma página por vez."""
+    return _chamar_api_id_brasil("casulo", params={"offset": offset}, log_visivel=log_visivel)
 
 def consultar_total_casulos_id_brasil():
     """GET /casulo/total — inteiro puro com a contagem total de casulos,
     usado pra saber quantas páginas percorrer em consultar_casulos_id_brasil."""
     return _chamar_api_id_brasil("casulo/total")
+
+def salvar_snapshot_id_brasil(itens):
+    """Substitui TODO o conteúdo da tabela estoque_id_brasil pelos itens
+    informados: apaga o snapshot anterior e grava o novo (delete + insert),
+    igual ao padrão já usado em salvar_lote_no_banco(). Os dados antigos são
+    descartados — não fica histórico acumulado, só o retrato mais recente.
+
+    itens: lista de dicts com id_externo, rua, linha, coluna, identificacao,
+    status, quantidade_itens, chave_casulo (chave_casulo pode ser None
+    quando a posição não bate com nenhum casulo mapeado no sistema).
+    """
+    conn = obter_conexao_bd()
+    if conn is None:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM estoque_id_brasil")
+            tamanho_bloco = 500
+            for i in range(0, len(itens), tamanho_bloco):
+                bloco = itens[i:i + tamanho_bloco]
+                marcadores = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s, now())"] * len(bloco))
+                valores_achatados = []
+                for it in bloco:
+                    valores_achatados.extend([
+                        it["id_externo"], it["rua"], it["linha"], it["coluna"],
+                        it["identificacao"], it["status"], it["quantidade_itens"],
+                        it["chave_casulo"],
+                    ])
+                cur.execute(
+                    f"""INSERT INTO estoque_id_brasil
+                        (id_externo, rua, linha, coluna, identificacao, status, quantidade_itens, chave_casulo, sincronizado_em)
+                        VALUES {marcadores}""",
+                    valores_achatados
+                )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        try:
+            conn.rollback()
+            conn.close()
+        except Exception:
+            pass
+        st.session_state.ultimo_erro_id_brasil = f"falha ao salvar snapshot no Supabase: {e}"
+        return False
+
+def carregar_snapshot_id_brasil_do_banco():
+    """Carrega o snapshot mais recente salvo em estoque_id_brasil, no formato
+    {chave_casulo: quantidade_itens} — só as linhas que resolveram uma chave
+    válida entram no dicionário. Retorna None se o banco não estiver
+    disponível (nesse caso o Visualizador cai pro lançamento manual, como
+    sempre foi)."""
+    conn = obter_conexao_bd()
+    if conn is None:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT chave_casulo, quantidade_itens FROM estoque_id_brasil WHERE chave_casulo IS NOT NULL")
+            linhas = cur.fetchall()
+        conn.close()
+    except Exception as e:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        st.session_state.ultimo_erro_id_brasil = str(e)
+        return None
+    return {chave: int(qtd) for chave, qtd in linhas}
+
+def sincronizar_snapshot_completo_id_brasil():
+    """Percorre TODAS as páginas de GET /casulo (só leitura), resolve a chave
+    interna (rua|lado|coluna|nível) de cada posição usando a mesma lógica já
+    usada na Consulta Rápida, e substitui o snapshot salvo em
+    estoque_id_brasil no Supabase. Retorna um resumo (dict), ou None se nem
+    chegou a buscar o total (ex: erro de conexão/autenticação)."""
+    total = consultar_total_casulos_id_brasil()
+    if not isinstance(total, int):
+        return None
+
+    todos_itens = []
+    offset = 0
+    while True:
+        pagina = consultar_casulos_id_brasil(offset=offset, log_visivel=False)
+        if not pagina:
+            break
+        todos_itens.extend(pagina)
+        offset += len(pagina)
+        if offset >= total:
+            break
+        if offset > total + 1000:  # trava de segurança contra loop infinito
+            break
+
+    processados = []
+    nao_resolvidos = 0
+    for item in todos_itens:
+        try:
+            rua_num = int(item["rua"])
+            nivel = str(item["linha"]).upper()
+            coluna = int(item["coluna"])
+        except (KeyError, TypeError, ValueError):
+            nao_resolvidos += 1
+            continue
+
+        chave, erro = resolver_chave_por_endereco(rua_num, nivel, coluna)
+        if erro:
+            chave = None
+            nao_resolvidos += 1
+
+        processados.append({
+            "id_externo": item.get("id"),
+            "rua": item.get("rua"),
+            "linha": item.get("linha"),
+            "coluna": item.get("coluna"),
+            "identificacao": item.get("identificacao"),
+            "status": item.get("status"),
+            "quantidade_itens": int(item.get("quantidadeItens", 0) or 0),
+            "chave_casulo": chave,
+        })
+
+    salvou = salvar_snapshot_id_brasil(processados)
+    return {
+        "total_api": total,
+        "total_lido": len(todos_itens),
+        "resolvidos": len(processados) - nao_resolvidos,
+        "nao_resolvidos": nao_resolvidos,
+        "salvou_no_banco": salvou,
+    }
 
 # ==========================================
 # CONFIGURAÇÕES DO CD NO SUPABASE
@@ -1358,6 +1496,8 @@ if 'ultimo_erro_id_brasil' not in st.session_state:
     st.session_state.ultimo_erro_id_brasil = None
 if 'ultimo_payload_id_brasil' not in st.session_state:
     st.session_state.ultimo_payload_id_brasil = None
+if 'quantidades_id_brasil' not in st.session_state:
+    st.session_state.quantidades_id_brasil = carregar_snapshot_id_brasil_do_banco() or {}
 
 if 'busca_destaque' not in st.session_state:
     st.session_state.busca_destaque = None
@@ -2048,26 +2188,30 @@ elif st.session_state.aba_ativa_selecionada == "📦 Visualizador de Casulos":
 
     with st.expander("🔄 Sincronizar da API ID Brasil (somente leitura)", expanded=False):
         st.caption(
-            "Consulta a API ID Brasil via GET (não escreve nada nela). "
-            "Por enquanto ainda não sabemos o tamanho de página nem os nomes "
-            "dos campos de 'casulo', então este botão busca o total e a "
-            "primeira página crua — assim que virmos o formato real, o "
-            "próximo passo é mapear os campos e paginar tudo automaticamente."
+            "Consulta TODAS as páginas da API ID Brasil via GET (não escreve "
+            "nada nela) e substitui o retrato salvo no Supabase pelo mais "
+            "recente — o snapshot anterior é descartado. Os números dos "
+            "casulos abaixo já usam esse dado real quando disponível."
         )
-        if st.button("🔄 Buscar da API ID Brasil", key="btn_sync_id_brasil"):
-            with st.spinner("Consultando API ID Brasil..."):
-                total = consultar_total_casulos_id_brasil()
-                primeira_pagina = consultar_casulos_id_brasil(offset=0)
-            st.session_state.ultimo_payload_id_brasil = {
-                "casulo_total": total,
-                "casulo_offset_0": primeira_pagina,
-            }
+        if st.button("🔄 Sincronizar agora", key="btn_sync_id_brasil"):
+            with st.spinner("Consultando todas as páginas da API ID Brasil e salvando no Supabase..."):
+                resumo = sincronizar_snapshot_completo_id_brasil()
 
-        if st.session_state.ultimo_erro_id_brasil:
-            st.error(f"❌ {st.session_state.ultimo_erro_id_brasil}")
-        elif st.session_state.ultimo_payload_id_brasil is not None:
-            st.success("✅ Resposta recebida. Confira o formato abaixo:")
-            st.json(st.session_state.ultimo_payload_id_brasil)
+            if resumo is None:
+                st.error(f"❌ {st.session_state.ultimo_erro_id_brasil}")
+            elif resumo["salvou_no_banco"] is not True:
+                st.error(
+                    f"⚠️ Consegui ler {resumo['total_lido']} de {resumo['total_api']} casulos da API, "
+                    f"mas salvar no Supabase falhou: `{st.session_state.ultimo_erro_id_brasil}`"
+                )
+            else:
+                st.session_state.quantidades_id_brasil = carregar_snapshot_id_brasil_do_banco() or {}
+                st.success(
+                    f"✅ Sincronizado! {resumo['total_lido']} de {resumo['total_api']} casulos lidos, "
+                    f"{resumo['resolvidos']} associados a um casulo do sistema"
+                    + (f" ({resumo['nao_resolvidos']} não encontraram correspondência)." if resumo['nao_resolvidos'] else ".")
+                )
+                st.rerun()
 
     lista_ruas = list(ESTRUTURA_CD.keys())
     rua_inicial_idx = 0
