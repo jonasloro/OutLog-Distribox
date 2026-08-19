@@ -1716,24 +1716,41 @@ if "configuracoes_cd_carregadas" not in st.session_state:
     st.session_state.configuracoes_cd_carregadas = bool(carregar_configuracoes_do_banco())
 
 # Inicialização do Estado
-if 'base_dados_cd' not in st.session_state:
+# Calcula um hash simples da estrutura atual — se mudou desde a última sessão
+# (ex: deploy novo, ou salvamento no Gerenciador), o base_dados_cd é
+# reconstruído automaticamente sem precisar reiniciar o servidor.
+import hashlib as _hashlib
+_hash_estrutura_atual = _hashlib.md5(
+    str(sorted((k, str(sorted(v.items()))) for k, v in ESTRUTURA_CD.items())).encode()
+).hexdigest()[:12]
+
+_deve_reconstruir = (
+    'base_dados_cd' not in st.session_state
+    or st.session_state.get('_hash_estrutura_cd') != _hash_estrutura_atual
+)
+
+if _deve_reconstruir:
     estoque_persistido = carregar_estoque_do_banco()
-    st.session_state.base_dados_cd = {}
+    novo_base = {}
     for r_nome, r_cfg in ESTRUTURA_CD.items():
         if r_cfg.get("tipo") in ("Inexistente", "Morta"):
             continue
         lista_lados = obter_lados_colunas_rua(r_nome, r_cfg)
-
         for lado, cols in lista_lados:
             for c in cols:
                 l_param = "par" if r_nome == "Rua 11" else ("impar" if lado == "seq" else lado)
                 spec = obter_especificacao_casulo(r_nome, c, l_param)
                 for n in spec["niveis"]:
                     chave_casulo = obter_chave_casulo(r_nome, lado, c, n)
+                    existente = st.session_state.get('base_dados_cd', {}).get(chave_casulo, {})
                     if estoque_persistido and chave_casulo in estoque_persistido:
-                        st.session_state.base_dados_cd[chave_casulo] = estoque_persistido[chave_casulo]
+                        novo_base[chave_casulo] = estoque_persistido[chave_casulo]
+                    elif existente:
+                        novo_base[chave_casulo] = existente
                     else:
-                        st.session_state.base_dados_cd[chave_casulo] = {}
+                        novo_base[chave_casulo] = {}
+    st.session_state.base_dados_cd = novo_base
+    st.session_state._hash_estrutura_cd = _hash_estrutura_atual
 
 if 'banco_dados_conectado' not in st.session_state:
     st.session_state.banco_dados_conectado = testar_conexao_bd()
