@@ -346,7 +346,7 @@ CAPACIDADE_FIXA_POR_RUA_PADRAO = {
     "Rua 11": {"aramado_G": 10, "metal_raso": 50},
     "Rua 14": {"madeira": 100, "metal_profundo": 100, "metal_raso": 100},
     "Rua 15": {"aramado_M": 7, "aramado_G": 12},
-    "Rua 16": {"aramado_G": 10},
+    "Rua 16": {"aramado_G": 10, "aramado_M": 6},
     "Rua 17": {"aramado_G": 12},
     "Rua 18": {"aramado_M": 12},
     "Rua 19": {"aramado_P": 6},
