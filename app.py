@@ -334,6 +334,9 @@ TRAVA_MAXIMA_M_VESTIDOS = 4     # vestidos em casulo M
 # aqui (feminino, e os tipos GG/madeira ainda não cobertos), o sistema cai
 # para a tabela por categoria.
 CAPACIDADE_FIXA_POR_RUA_PADRAO = {
+    "Rua 06": {"aramado_M": 6},
+    "Rua 07": {"aramado_M": 6},
+    "Rua 08": {"aramado_M": {"par": 6, "impar": 8}},
     "Rua 15": {"aramado_M": 7, "aramado_G": 12},
     "Rua 16": {"aramado_G": 10},
     "Rua 17": {"aramado_G": 12},
@@ -497,21 +500,38 @@ def obter_faixa_categoria(categoria_peca, tipo_estrutural, estacao, rua_nome):
 def peca_permitida(categoria_peca, tipo_estrutural, estacao, rua_nome):
     return obter_faixa_categoria(categoria_peca, tipo_estrutural, estacao, rua_nome) is not None
 
-def obter_faixa_capacidade(categoria_peca, tipo_estrutural, estacao, rua_nome):
+def _obter_capacidade_fixa(rua_nome, tipo_estrutural, lado=None):
+    """Lê CAPACIDADE_FIXA_POR_RUA. O valor cadastrado pode ser:
+      - um número (a maioria das ruas): vale pros dois lados igual;
+      - um dict {"par": X, "impar": Y} (hoje só a Rua 08): valor diferente
+        por lado. Se o lado não for informado no lugar que chamou (nem
+        sempre dá pra saber), usa o menor dos dois valores — mesmo
+        critério conservador que o resto do motor já usa pra faixas."""
+    valor = CAPACIDADE_FIXA_POR_RUA.get(rua_nome, {}).get(tipo_estrutural)
+    if valor is None:
+        return None
+    if isinstance(valor, dict):
+        if lado and lado in valor:
+            return valor[lado]
+        valores = [v for v in valor.values() if v is not None]
+        return min(valores) if valores else None
+    return valor
+
+def obter_faixa_capacidade(categoria_peca, tipo_estrutural, estacao, rua_nome, lado=None):
     """Faixa exibida na tela: densidade fixa da rua quando existir, senão a
     faixa da tabela por categoria."""
-    fixa = CAPACIDADE_FIXA_POR_RUA.get(rua_nome, {}).get(tipo_estrutural)
+    fixa = _obter_capacidade_fixa(rua_nome, tipo_estrutural, lado)
     if fixa is not None:
         return (fixa, fixa)
     return obter_faixa_categoria(categoria_peca, tipo_estrutural, estacao, rua_nome)
 
-def obter_capacidade_minima(categoria_peca, tipo_estrutural, estacao, rua_nome):
+def obter_capacidade_minima(categoria_peca, tipo_estrutural, estacao, rua_nome, lado=None):
     # A proibição (ex: Jaquetas Pesadas em aramado) vale sempre, mesmo em
     # ruas com densidade fixa.
     if not peca_permitida(categoria_peca, tipo_estrutural, estacao, rua_nome):
         return 0
 
-    fixa = CAPACIDADE_FIXA_POR_RUA.get(rua_nome, {}).get(tipo_estrutural)
+    fixa = _obter_capacidade_fixa(rua_nome, tipo_estrutural, lado)
     if fixa is not None:
         return fixa
 
@@ -523,11 +543,11 @@ def obter_capacidade_minima(categoria_peca, tipo_estrutural, estacao, rua_nome):
         valor = min(valor, TRAVA_MAXIMA_M_VESTIDOS)
     return valor
 
-def obter_capacidade_estimada_exibicao(tipo_estrutural, rua_nome):
-    fixa = CAPACIDADE_FIXA_POR_RUA.get(rua_nome, {}).get(tipo_estrutural)
+def obter_capacidade_estimada_exibicao(tipo_estrutural, rua_nome, lado=None):
+    fixa = _obter_capacidade_fixa(rua_nome, tipo_estrutural, lado)
     if fixa is not None:
         return fixa
-    return obter_capacidade_minima(CATEGORIA_REFERENCIA_DISPLAY, tipo_estrutural, "Verão", rua_nome)
+    return obter_capacidade_minima(CATEGORIA_REFERENCIA_DISPLAY, tipo_estrutural, "Verão", rua_nome, lado)
 
 def calcular_pecas_totais(dados_casulo):
     return sum(dados_casulo.values()) if dados_casulo else 0
@@ -551,7 +571,7 @@ def botao_exportar_excel(df, nome_arquivo, label="📥 Baixar em Excel (.xlsx)",
         key=key,
     )
 
-def calcular_fracao_ocupada(dados_casulo, tipo_estrutural, rua_nome):
+def calcular_fracao_ocupada(dados_casulo, tipo_estrutural, rua_nome, lado=None):
     """
     % de ocupação real do casulo, considerando o mix de categorias/estações
     guardado nele. Cada combinação consome capacidade proporcional ao seu
@@ -562,19 +582,19 @@ def calcular_fracao_ocupada(dados_casulo, tipo_estrutural, rua_nome):
     fracao = 0.0
     for chave_combo, qtd in dados_casulo.items():
         categoria_peca, estacao = chave_combo.split("|", 1)
-        cap_min = obter_capacidade_minima(categoria_peca, tipo_estrutural, estacao, rua_nome)
+        cap_min = obter_capacidade_minima(categoria_peca, tipo_estrutural, estacao, rua_nome, lado)
         if cap_min > 0:
             fracao += qtd / cap_min
     return fracao
 
-def obter_capacidade_estimada_segura(tipo_estrutural, rua_nome):
+def obter_capacidade_estimada_segura(tipo_estrutural, rua_nome, lado=None):
     """Igual obter_capacidade_estimada_exibicao, mas nunca deixa a
     capacidade virar 0/None — cai num valor genérico (20) quando a
     combinação de tipo/rua não tem nada cadastrado na tabela de capacidade.
     Usado pelas posições que só existem no dado real da ID Brasil e ainda
     não têm uma capacidade específica configurada."""
     try:
-        valor = obter_capacidade_estimada_exibicao(tipo_estrutural, rua_nome)
+        valor = obter_capacidade_estimada_exibicao(tipo_estrutural, rua_nome, lado)
     except Exception:
         valor = 0
     return valor if valor and valor > 0 else 20
@@ -586,7 +606,7 @@ def montar_html_nicho_id_brasil(rua_nome, coluna_num, nivel, quantidade):
     lado = "impar" if coluna_num % 2 == 1 else "par"
     spec = obter_especificacao_casulo(rua_nome, coluna_num, lado)
     tipo_estrutural = spec.get("tipo_estrutural") or "aramado_P"
-    capacidade_estimada = obter_capacidade_estimada_segura(tipo_estrutural, rua_nome)
+    capacidade_estimada = obter_capacidade_estimada_segura(tipo_estrutural, rua_nome, lado)
     pct_ocupacao = (quantidade / capacidade_estimada * 100) if capacidade_estimada else 0.0
 
     status = "livre"
@@ -660,7 +680,7 @@ def montar_html_nicho(rua_selecionada, col_num, nivel, spec, chave_lado):
         return "<div class='nicho' style='background: transparent;'>-</div>"
 
     chave = obter_chave_casulo(rua_selecionada, chave_lado, col_num, nivel)
-    capacidade_estimada = obter_capacidade_estimada_exibicao(spec["tipo_estrutural"], rua_selecionada)
+    capacidade_estimada = obter_capacidade_estimada_exibicao(spec["tipo_estrutural"], rua_selecionada, chave_lado)
 
     qtd_id_brasil = st.session_state.quantidades_id_brasil.get(chave)
     if qtd_id_brasil is not None:
@@ -673,7 +693,7 @@ def montar_html_nicho(rua_selecionada, col_num, nivel, spec, chave_lado):
     else:
         dados_casulo = st.session_state.base_dados_cd.get(chave, {})
         pecas_atuais = calcular_pecas_totais(dados_casulo)
-        pct_ocupacao = calcular_fracao_ocupada(dados_casulo, spec["tipo_estrutural"], rua_selecionada) * 100
+        pct_ocupacao = calcular_fracao_ocupada(dados_casulo, spec["tipo_estrutural"], rua_selecionada, chave_lado) * 100
         fonte_txt = " | fonte: lançamento manual"
 
     status = "livre"
@@ -1167,8 +1187,20 @@ def _aplicar_configuracoes_do_banco(linhas_estrutura, linhas_capacidade, linhas_
 
     fixa_nova = {}
     for row in linhas_fixas:
-        rua, tipo_casulo, capacidade = row
-        fixa_nova.setdefault(str(rua), {})[str(tipo_casulo)] = int(capacidade)
+        rua, tipo_casulo, capacidade, lado = row
+        rua, tipo_casulo = str(rua), str(tipo_casulo)
+        capacidade = int(capacidade)
+        lado = str(lado).strip() if lado else None
+        if lado in ("par", "impar"):
+            # Densidade por lado (hoje só a Rua 08): guarda como dict
+            # {"par": X, "impar": Y} em vez de sobrescrever o valor único.
+            existente = fixa_nova.setdefault(rua, {}).get(tipo_casulo)
+            if not isinstance(existente, dict):
+                existente = {}
+            existente[lado] = capacidade
+            fixa_nova[rua][tipo_casulo] = existente
+        else:
+            fixa_nova.setdefault(rua, {})[tipo_casulo] = capacidade
     if fixa_nova:
         CAPACIDADE_FIXA_POR_RUA = fixa_nova
 
@@ -1191,8 +1223,15 @@ def carregar_configuracoes_do_banco():
                 ORDER BY genero, estacao, categoria, tipo_casulo
             """)
             linhas_capacidade = cur.fetchall()
+            # 'lado' é opcional (NULL = vale pros dois lados da rua) — só a
+            # Rua 08 usa hoje, pra ter capacidade diferente em par e ímpar.
+            # ADD COLUMN IF NOT EXISTS é seguro de rodar toda vez.
+            try:
+                cur.execute("ALTER TABLE capacidade_fixa_rua ADD COLUMN IF NOT EXISTS lado VARCHAR(10)")
+            except Exception:
+                conn.rollback()
             cur.execute("""
-                SELECT rua, tipo_casulo, capacidade
+                SELECT rua, tipo_casulo, capacidade, lado
                 FROM capacidade_fixa_rua ORDER BY rua, tipo_casulo
             """)
             linhas_fixas = cur.fetchall()
@@ -1319,9 +1358,18 @@ def carregar_capacidade_fixa_para_editor():
     if conn is None: return None
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT rua, tipo_casulo, capacidade FROM capacidade_fixa_rua ORDER BY rua, tipo_casulo")
+            try:
+                cur.execute("ALTER TABLE capacidade_fixa_rua ADD COLUMN IF NOT EXISTS lado VARCHAR(10)")
+            except Exception:
+                conn.rollback()
+            cur.execute("SELECT rua, tipo_casulo, lado, capacidade FROM capacidade_fixa_rua ORDER BY rua, tipo_casulo, lado")
             rows=cur.fetchall()
-        conn.close(); return pd.DataFrame(rows, columns=["Rua","Tipo de Casulo","Capacidade"])
+        conn.close()
+        # 'Lado' fica em branco pra maioria das linhas — só preenche
+        # ("par"/"impar") quando a rua tiver capacidade diferente por lado
+        # (hoje só a Rua 08).
+        rows_fmt = [(rua, tipo, lado or "", cap) for rua, tipo, lado, cap in rows]
+        return pd.DataFrame(rows_fmt, columns=["Rua","Tipo de Casulo","Lado","Capacidade"])
     except Exception as e:
         try: conn.close()
         except Exception: pass
@@ -1332,19 +1380,26 @@ def salvar_capacidade_fixa_do_editor(df):
     if conn is None: return False
     try:
         tipos_validos={"aramado_P","aramado_M","aramado_G","metal_raso","metal_profundo","madeira"}
+        lados_validos={"", "par", "impar"}
         registros=[]; chaves=set()
         for _,row in df.iterrows():
             rua=str(row.get("Rua","")).strip(); tipo=str(row.get("Tipo de Casulo","")).strip()
+            lado=str(row.get("Lado","") or "").strip().lower()
             if not rua: raise ValueError("Existe uma linha sem Rua na densidade fixa.")
             if tipo not in tipos_validos: raise ValueError(f"Tipo estrutural inválido: {tipo}")
+            if lado not in lados_validos: raise ValueError(f"Lado inválido em {rua}/{tipo}: use 'par', 'impar' ou deixe em branco.")
             capacidade=int(row.get("Capacidade"))
             if capacidade<0: raise ValueError("A capacidade fixa não pode ser negativa.")
-            chave=(rua,tipo)
-            if chave in chaves: raise ValueError(f"Densidade fixa duplicada: {rua}/{tipo}")
-            chaves.add(chave); registros.append((rua,tipo,capacidade))
+            chave=(rua,tipo,lado)
+            if chave in chaves: raise ValueError(f"Densidade fixa duplicada: {rua}/{tipo}/{lado or 'ambos'}")
+            chaves.add(chave); registros.append((rua,tipo,capacidade,lado or None))
         with conn.cursor() as cur:
+            try:
+                cur.execute("ALTER TABLE capacidade_fixa_rua ADD COLUMN IF NOT EXISTS lado VARCHAR(10)")
+            except Exception:
+                conn.rollback()
             cur.execute("DELETE FROM capacidade_fixa_rua")
-            cur.executemany("INSERT INTO capacidade_fixa_rua (rua,tipo_casulo,capacidade) VALUES (%s,%s,%s)", registros)
+            cur.executemany("INSERT INTO capacidade_fixa_rua (rua,tipo_casulo,capacidade,lado) VALUES (%s,%s,%s,%s)", registros)
         conn.commit(); conn.close(); return carregar_configuracoes_do_banco()
     except Exception as e:
         try: conn.rollback(); conn.close()
@@ -3480,9 +3535,16 @@ elif st.session_state.aba_ativa_selecionada == "📥 Entrada de Dados / Abasteci
         st.dataframe(df_inverno, use_container_width=True, hide_index=True)
         botao_exportar_excel(df_inverno, "capacidade_inverno_feminino.xlsx", key="export_inverno")
 
-        st.markdown("**Densidade fixa por rua (Masculino)** — sobrepõe a tabela de categoria")
+        st.markdown("**Densidade fixa por rua** — sobrepõe a tabela de categoria")
         df_fixa = pd.DataFrame([
-            {"Rua": rua, "Tipo": tipo, "Capacidade fixa": valor}
+            {
+                "Rua": rua,
+                "Tipo": tipo,
+                "Capacidade fixa": (
+                    f"Par: {valor.get('par', '—')} / Ímpar: {valor.get('impar', '—')}"
+                    if isinstance(valor, dict) else str(valor)
+                ),
+            }
             for rua, tipos in CAPACIDADE_FIXA_POR_RUA.items()
             for tipo, valor in tipos.items()
         ])
