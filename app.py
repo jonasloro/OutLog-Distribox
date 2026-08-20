@@ -686,19 +686,55 @@ def montar_html_nicho(rua_selecionada, col_num, nivel, spec, chave_lado):
     return f"<div class='nicho {status} {classe_destaque}' title='{col_num:03d}-{nivel} | {pecas_atuais}/{capacidade_estimada} peças ({pct_ocupacao:.1f}% da capacidade){fonte_txt}'>{pecas_atuais}/{capacidade_estimada}</div>"
 
 def selecionar_bloco_colunas(todas_colunas, tamanho_bloco, chave_estado):
-    """Mostra um bloco de colunas por vez com botões ◀ ▶ pra navegar sem
-    precisar subir a tela e trocar num seletor lá em cima. chave_estado
-    precisa ser única (ex: nome da rua + lado) pra cada grade ter sua
-    própria posição de navegação."""
+    """Mostra um bloco de colunas por vez, com DUAS formas de navegar entre
+    blocos: um seletor no topo pra ir direto num bloco específico, e os
+    botões ◀ ▶ logo abaixo pra andar um bloco de cada vez sem precisar subir
+    a tela até o seletor. chave_estado precisa ser única (ex: nome da rua +
+    lado) pra cada grade ter sua própria posição de navegação."""
     if len(todas_colunas) <= tamanho_bloco:
         return todas_colunas
 
     total_blocos = math.ceil(len(todas_colunas) / tamanho_bloco)
     chave_idx = f"bloco_idx_{chave_estado}"
+    chave_select = f"bloco_select_{chave_estado}"
     if chave_idx not in st.session_state:
         st.session_state[chave_idx] = 0
     st.session_state[chave_idx] = max(0, min(st.session_state[chave_idx], total_blocos - 1))
     idx = st.session_state[chave_idx]
+
+    def _faixa_bloco(i):
+        inicio = todas_colunas[i * tamanho_bloco]
+        fim = todas_colunas[min((i + 1) * tamanho_bloco, len(todas_colunas)) - 1]
+        return inicio, fim
+
+    opcoes_blocos = []
+    for i in range(total_blocos):
+        inicio_i, fim_i = _faixa_bloco(i)
+        opcoes_blocos.append(f"Bloco {i + 1}/{total_blocos} — colunas {inicio_i:03d} a {fim_i:03d}")
+
+    # Sincroniza o valor do seletor com o índice atual (chave_idx), mas SÓ
+    # quando o índice mudou por causa dos botões ◀ ▶ (que não têm como
+    # tocar no seletor depois de já criado, no mesmo Streamlit run — ver
+    # comentário abaixo). Se o índice não mudou desde a última sincronia,
+    # deixamos o valor do seletor em paz: pode ser que ele tenha acabado
+    # de mudar por causa do próprio usuário escolhendo outra opção nele, e
+    # sobrescrever aqui apagaria essa escolha antes dela ser lida abaixo.
+    chave_espelho = f"bloco_espelho_{chave_estado}"
+    if st.session_state.get(chave_espelho) != idx:
+        st.session_state[chave_select] = opcoes_blocos[idx]
+        st.session_state[chave_espelho] = idx
+
+    opcao_escolhida = st.selectbox(
+        "Ir direto para o bloco:",
+        options=opcoes_blocos,
+        key=chave_select,
+        label_visibility="collapsed",
+    )
+    if opcao_escolhida != opcoes_blocos[idx]:
+        novo_idx = opcoes_blocos.index(opcao_escolhida)
+        st.session_state[chave_idx] = novo_idx
+        st.session_state[chave_espelho] = novo_idx
+        st.rerun()
 
     col_nav1, col_nav2, col_nav3 = st.columns([1, 3, 1])
     with col_nav1:
@@ -706,8 +742,7 @@ def selecionar_bloco_colunas(todas_colunas, tamanho_bloco, chave_estado):
             st.session_state[chave_idx] -= 1
             st.rerun()
     with col_nav2:
-        inicio = todas_colunas[idx * tamanho_bloco]
-        fim = todas_colunas[min((idx + 1) * tamanho_bloco, len(todas_colunas)) - 1]
+        inicio, fim = _faixa_bloco(idx)
         st.markdown(
             f"<p style='text-align:center; color:#8892b0; font-size:12px; padding-top:6px;'>"
             f"Bloco {idx + 1}/{total_blocos} — colunas {inicio:03d} a {fim:03d}</p>",
@@ -719,6 +754,7 @@ def selecionar_bloco_colunas(todas_colunas, tamanho_bloco, chave_estado):
             st.rerun()
 
     return todas_colunas[idx * tamanho_bloco: (idx + 1) * tamanho_bloco]
+
 
 def renderizar_cabecalho_colunas(lista_colunas):
     grid_header = st.columns(len(lista_colunas) + 1)
@@ -2555,13 +2591,28 @@ elif st.session_state.aba_ativa_selecionada == "📦 Visualizador de Casulos":
                 st.caption("A grade abaixo já está atualizada com esse resultado — não precisa recarregar a página.")
 
     lista_ruas = list(ESTRUTURA_CD.keys())
-    rua_inicial_idx = 0
-    if st.session_state.busca_destaque and st.session_state.busca_destaque['rua'] in lista_ruas:
-        rua_inicial_idx = lista_ruas.index(st.session_state.busca_destaque['rua'])
-    elif st.session_state.get('rua_forcada_visualizador') in lista_ruas:
-        rua_inicial_idx = lista_ruas.index(st.session_state.rua_forcada_visualizador)
 
-    rua_selecionada = st.selectbox("Selecione a Rua para Inspeção Detalhada:", lista_ruas, index=rua_inicial_idx)
+    # Seletor de rua com chave própria (Session State), em vez de só
+    # 'index='. Sem uma chave fixa, o Streamlit recria esse widget do zero
+    # a cada re-run da página — inclusive um simples clique nos botões ◀ ▶
+    # de paginação — e ele voltava sempre pra primeira rua da lista,
+    # perdendo a rua que o usuário tinha escolhido. Agora só forçamos a
+    # troca quando há um motivo explícito (Localizador Global ou navegação
+    # vinda de outra tela); nos demais re-runs, o valor que o usuário
+    # escolheu manualmente é preservado.
+    CHAVE_RUA_VISUALIZADOR = "visualizador_rua_selecionada"
+    if CHAVE_RUA_VISUALIZADOR not in st.session_state or st.session_state[CHAVE_RUA_VISUALIZADOR] not in lista_ruas:
+        st.session_state[CHAVE_RUA_VISUALIZADOR] = lista_ruas[0] if lista_ruas else None
+    if st.session_state.busca_destaque and st.session_state.busca_destaque['rua'] in lista_ruas:
+        st.session_state[CHAVE_RUA_VISUALIZADOR] = st.session_state.busca_destaque['rua']
+    elif st.session_state.get('rua_forcada_visualizador') in lista_ruas:
+        st.session_state[CHAVE_RUA_VISUALIZADOR] = st.session_state.rua_forcada_visualizador
+
+    rua_selecionada = st.selectbox(
+        "Selecione a Rua para Inspeção Detalhada:",
+        lista_ruas,
+        key=CHAVE_RUA_VISUALIZADOR,
+    )
     st.session_state.rua_forcada_visualizador = None
 
     config_rua = ESTRUTURA_CD.get(rua_selecionada, {})
