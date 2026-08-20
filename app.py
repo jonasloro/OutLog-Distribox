@@ -2651,7 +2651,7 @@ elif st.session_state.aba_ativa_selecionada == "📦 Visualizador de Casulos":
 
             blocos_r14 = [
                 ("🌲 Bloco 1: Prateleiras de Madeira Gigante (Colunas 01 a 23)", list(range(1, 24))),
-                ("🔩 Bloco 2: Prateleiras de Metal Profundo (Colunas 24 a 31)", list(range(24, 32))),
+                ("🔩 Bloco 2: Prateleiras de Metal Profundo (Colunas 26 a 32)", list(range(26, 33))),
                 ("⚙️ Bloco 3: Prateleiras de Metal Raso (Colunas 42 a 48)", list(range(42, 49)))
             ]
 
