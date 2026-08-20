@@ -334,7 +334,7 @@ TRAVA_MAXIMA_M_VESTIDOS = 4     # vestidos em casulo M
 # aqui (feminino, e os tipos GG/madeira ainda não cobertos), o sistema cai
 # para a tabela por categoria.
 CAPACIDADE_FIXA_POR_RUA_PADRAO = {
-    "Rua 02": {"aramado_P": 6, "aramado_G": 20},
+    "Rua 02": {"aramado_P": 6, "aramado_G": 10},
     "Rua 03": {"aramado_P": 6},
     "Rua 04": {"aramado_P": 6, "aramado_G": 10},
     "Rua 05": {"aramado_M": 6},
