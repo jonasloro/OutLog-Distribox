@@ -2565,12 +2565,19 @@ def calcular_resumo_estocagem():
 
     for rua in ruas_nomes:
         soma_fracoes_rua, contagem_rua, soma_pecas_rua, livres_rua = calcular_estatisticas_rua(rua)
-        pct_rua = (soma_fracoes_rua / contagem_rua * 100) if contagem_rua > 0 else 0.0
-        estatisticas_por_rua.append({"Rua": rua, "Ocupação (%)": round(pct_rua, 1), "Casulos Zerados": livres_rua})
         total_casulos += contagem_rua
         soma_fracoes_geral += soma_fracoes_rua
         total_pecas_atuais += soma_pecas_rua
         casulos_livres += livres_rua
+        if contagem_rua == 0:
+            # Rua sem nenhum casulo cadastrado (ex: Rua 01, que é
+            # porta-palete, não tem endereço de casulo nenhum) não é uma
+            # "rua física" de casulos de verdade — não entra no mapa de
+            # calor nem no ranking de mais cheia/mais vazia, senão ela
+            # sempre ganha de goleada como "mais vazia" só por ter 0/0.
+            continue
+        pct_rua = soma_fracoes_rua / contagem_rua * 100
+        estatisticas_por_rua.append({"Rua": rua, "Ocupação (%)": round(pct_rua, 1), "Casulos Zerados": livres_rua})
 
     pct_geral = (soma_fracoes_geral / total_casulos * 100) if total_casulos > 0 else 0.0
     return total_casulos, pct_geral, casulos_livres, total_pecas_atuais, estatisticas_por_rua
