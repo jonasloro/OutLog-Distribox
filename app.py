@@ -111,7 +111,7 @@ ESTRUTURA_CD_PADRAO = {
     # Rua 02 — Par 22-102 (P) | Ímpar 21-93 (P) | Seq 103-139 (G unilateral)
     "Rua 02": {"tipo": "Misto_Transicao_R02",
                 "cols_par":   list(range(22, 104, 2)),
-                "cols_impar": list(range(19, 94,  2)),
+                "cols_impar": list(range(21, 94,  2)),
                 "cols_seq":   list(range(103, 140))},
 
     # Rua 03 — Par 22-102 (P) | Ímpar 19-103 (P)
@@ -2676,19 +2676,19 @@ elif st.session_state.aba_ativa_selecionada == "📦 Visualizador de Casulos":
                             st.markdown(montar_html_nicho(rua_selecionada, col_num, nivel, spec_col, "seq"), unsafe_allow_html=True)
                 st.markdown("</div>", unsafe_allow_html=True)
 
-        elif "cols_seq" in config_rua or rua_selecionada == "Rua 11":
-            if rua_selecionada == "Rua 11":
-                todas_colunas = config_rua.get("cols_par", [])
-            else:
-                todas_colunas = config_rua.get("cols_seq", [])
+        elif rua_selecionada == "Rua 11":
+            # Corredor unilateral: só o lado PAR existe fisicamente (colunas
+            # 22 a 94), tratado internamente com chave "par" — mais as 3
+            # colunas de metal (129, 131, 133), já incluídas em cols_par por
+            # obter_lados_colunas_rua.
+            todas_colunas = config_rua.get("cols_par", [])
 
             if not todas_colunas:
                 st.warning(f"⚠️ Não existem casulos cadastrados nesta rua ({rua_selecionada}).")
             else:
                 colunas_exemplo = selecionar_bloco_colunas(todas_colunas, 25, f"{rua_selecionada}_seq")
 
-                l_ref = "par" if rua_selecionada == "Rua 11" else "impar"
-                spec_ref = obter_especificacao_casulo(rua_selecionada, colunas_exemplo[0] if colunas_exemplo else 22, l_ref)
+                spec_ref = obter_especificacao_casulo(rua_selecionada, colunas_exemplo[0] if colunas_exemplo else 22, "par")
                 niveis_ordenados = sorted(spec_ref["niveis"])
 
                 st.markdown(f"<p style='text-align:center; color:#8892b0; font-size:12px;'>Especificação: <b>{spec_ref['tipo_desc']}</b></p>", unsafe_allow_html=True)
@@ -2704,13 +2704,50 @@ elif st.session_state.aba_ativa_selecionada == "📦 Visualizador de Casulos":
                         st.markdown(f"<div style='line-height:28px; text-align:center; font-weight:bold; color:#8892b0; font-size: 10px;'>{nivel}</div>", unsafe_allow_html=True)
                     for idx, col_num in enumerate(colunas_exemplo):
                         with grid_seq[idx + 1]:
-                            l_param_col = "par" if rua_selecionada == "Rua 11" else "impar"
-                            spec_col = obter_especificacao_casulo(rua_selecionada, col_num, l_param_col)
-                            lado_chave = "par" if rua_selecionada == "Rua 11" else "seq"
-                            st.markdown(montar_html_nicho(rua_selecionada, col_num, nivel, spec_col, lado_chave), unsafe_allow_html=True)
+                            spec_col = obter_especificacao_casulo(rua_selecionada, col_num, "par")
+                            st.markdown(montar_html_nicho(rua_selecionada, col_num, nivel, spec_col, "par"), unsafe_allow_html=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+
+        elif config_rua.get("cols_seq") and not config_rua.get("cols_impar") and not config_rua.get("cols_par"):
+            # Corredor 100% sequencial/unilateral (sem lado ímpar/par
+            # separado) — hoje só cai aqui rua ainda não mapeada por nome
+            # (Rua 14/20/21 já têm bloco próprio acima). Mantido como
+            # fallback genérico para não deixar uma rua futura sem tela.
+            todas_colunas = config_rua.get("cols_seq", [])
+
+            if not todas_colunas:
+                st.warning(f"⚠️ Não existem casulos cadastrados nesta rua ({rua_selecionada}).")
+            else:
+                colunas_exemplo = selecionar_bloco_colunas(todas_colunas, 25, f"{rua_selecionada}_seq")
+
+                spec_ref = obter_especificacao_casulo(rua_selecionada, colunas_exemplo[0] if colunas_exemplo else todas_colunas[0], "seq")
+                niveis_ordenados = sorted(spec_ref["niveis"])
+
+                st.markdown(f"<p style='text-align:center; color:#8892b0; font-size:12px;'>Especificação: <b>{spec_ref['tipo_desc']}</b></p>", unsafe_allow_html=True)
+
+                st.markdown("<div class='lado-container'>", unsafe_allow_html=True)
+                st.markdown(f"<div class='lado-titulo'>Corredor Sequencial ({rua_selecionada})</div>", unsafe_allow_html=True)
+
+                renderizar_cabecalho_colunas(colunas_exemplo)
+
+                for nivel in niveis_ordenados:
+                    grid_seq = st.columns(len(colunas_exemplo) + 1)
+                    with grid_seq[0]:
+                        st.markdown(f"<div style='line-height:28px; text-align:center; font-weight:bold; color:#8892b0; font-size: 10px;'>{nivel}</div>", unsafe_allow_html=True)
+                    for idx, col_num in enumerate(colunas_exemplo):
+                        with grid_seq[idx + 1]:
+                            spec_col = obter_especificacao_casulo(rua_selecionada, col_num, "seq")
+                            st.markdown(montar_html_nicho(rua_selecionada, col_num, nivel, spec_col, "seq"), unsafe_allow_html=True)
                 st.markdown("</div>", unsafe_allow_html=True)
 
         else:
+            # Corredor com lado Ímpar/Par (ex: maioria das ruas) — e, quando
+            # a rua também tiver um trecho "cols_seq" (caso da Rua 02: P nos
+            # dois lados até a coluna ~100, virando G sequencial dali pra
+            # frente), esse trecho é renderizado como um bloco extra logo
+            # abaixo do Ímpar/Par, em vez de ser ignorado. Antes desta
+            # correção, uma rua com os três (Rua 02) caía no ramo puramente
+            # sequencial acima e tinha as colunas Ímpar/Par escondidas.
             todas_cols_impares = config_rua.get("cols_impar", [])
             todas_cols_pares = config_rua.get("cols_par", [])
             todas_colunas = sorted(list(set(todas_cols_impares + todas_cols_pares)))
@@ -2778,6 +2815,35 @@ elif st.session_state.aba_ativa_selecionada == "📦 Visualizador de Casulos":
                     else:
                         st.markdown("<p style='color: #8892b0; font-size: 12px; padding: 20px;'>Sem casulos neste lado.</p>", unsafe_allow_html=True)
                     st.markdown("</div>", unsafe_allow_html=True)
+
+                # Trecho sequencial extra (hoje só existe na Rua 02: colunas
+                # 103 a 139, sem lado ímpar/par — vira aramado G a partir
+                # daqui). Antes desta correção esse trecho não aparecia em
+                # lugar nenhum quando a rua também tinha ímpar/par.
+                todas_cols_seq = config_rua.get("cols_seq", [])
+                if todas_cols_seq:
+                    st.markdown("<hr style='border-color:#1f2833; margin: 18px 0;'>", unsafe_allow_html=True)
+                    colunas_seq_exemplo = selecionar_bloco_colunas(todas_cols_seq, 25, f"{rua_selecionada}_seq_extra")
+                    spec_seq_ref = obter_especificacao_casulo(rua_selecionada, colunas_seq_exemplo[0], "seq")
+                    niveis_seq_ordenados = sorted(spec_seq_ref["niveis"])
+
+                    st.markdown(
+                        f"<p style='text-align:center; color:#8892b0; font-size:12px;'>Trecho sequencial (colunas {min(todas_cols_seq):03d} a {max(todas_cols_seq):03d}) — Especificação: <b>{spec_seq_ref['tipo_desc']}</b></p>",
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown("<div class='lado-container'>", unsafe_allow_html=True)
+                    st.markdown(f"<div class='lado-titulo'>Trecho Sequencial ({rua_selecionada})</div>", unsafe_allow_html=True)
+                    renderizar_cabecalho_colunas(colunas_seq_exemplo)
+                    for nivel in niveis_seq_ordenados:
+                        grid_seq_extra = st.columns(len(colunas_seq_exemplo) + 1)
+                        with grid_seq_extra[0]:
+                            st.markdown(f"<div style='line-height:28px; text-align:center; font-weight:bold; color:#8892b0; font-size: 10px;'>{nivel}</div>", unsafe_allow_html=True)
+                        for idx, col_num in enumerate(colunas_seq_exemplo):
+                            with grid_seq_extra[idx + 1]:
+                                spec_col = obter_especificacao_casulo(rua_selecionada, col_num, "seq")
+                                st.markdown(montar_html_nicho(rua_selecionada, col_num, nivel, spec_col, "seq"), unsafe_allow_html=True)
+                    st.markdown("</div>", unsafe_allow_html=True)
+
 
 
 # ==========================================
