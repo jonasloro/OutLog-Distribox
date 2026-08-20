@@ -518,36 +518,28 @@ def _obter_capacidade_fixa(rua_nome, tipo_estrutural, lado=None):
     return valor
 
 def obter_faixa_capacidade(categoria_peca, tipo_estrutural, estacao, rua_nome, lado=None):
-    """Faixa exibida na tela: densidade fixa da rua quando existir, senão a
-    faixa da tabela por categoria."""
-    fixa = _obter_capacidade_fixa(rua_nome, tipo_estrutural, lado)
-    if fixa is not None:
-        return (fixa, fixa)
-    return obter_faixa_categoria(categoria_peca, tipo_estrutural, estacao, rua_nome)
+    """Faixa exibida na tela. Decisão tomada com você: a capacidade agora é
+    SEMPRE a densidade fixa por rua/tipo(/lado) — a tabela por categoria não
+    é mais usada pra definir quantas peças cabem (só continua existindo
+    pra decidir quais categorias podem ser lançadas em cada tipo de
+    casulo — ver peca_permitida, usada nas telas de cadastro/simulador)."""
+    fixa = obter_capacidade_estimada_exibicao(tipo_estrutural, rua_nome, lado)
+    return (fixa, fixa)
 
 def obter_capacidade_minima(categoria_peca, tipo_estrutural, estacao, rua_nome, lado=None):
-    # A proibição (ex: Jaquetas Pesadas em aramado) vale sempre, mesmo em
-    # ruas com densidade fixa.
-    if not peca_permitida(categoria_peca, tipo_estrutural, estacao, rua_nome):
-        return 0
-
-    fixa = _obter_capacidade_fixa(rua_nome, tipo_estrutural, lado)
-    if fixa is not None:
-        return fixa
-
-    faixa = obter_faixa_categoria(categoria_peca, tipo_estrutural, estacao, rua_nome)
-    valor = faixa[0] if faixa else 0
-    if valor and tipo_estrutural == "aramado_P":
-        valor = min(valor, TRAVA_MAXIMA_P)
-    if valor and tipo_estrutural == "aramado_M" and "Vestido" in categoria_peca:
-        valor = min(valor, TRAVA_MAXIMA_M_VESTIDOS)
-    return valor
+    """Mantido com essa assinatura (categoria_peca/estacao) só pra não
+    precisar mexer em quem já chama esta função — mas os dois parâmetros
+    não influenciam mais o número: a capacidade é sempre a densidade fixa
+    por rua/tipo(/lado)."""
+    return obter_capacidade_estimada_exibicao(tipo_estrutural, rua_nome, lado)
 
 def obter_capacidade_estimada_exibicao(tipo_estrutural, rua_nome, lado=None):
+    """Fonte única da capacidade de um casulo: a densidade fixa cadastrada
+    para rua+tipo(+lado). Se ainda não houver densidade cadastrada pra essa
+    combinação, cai num valor genérico (20) só pra não quebrar a conta —
+    até a densidade real ser cadastrada no Gerenciador."""
     fixa = _obter_capacidade_fixa(rua_nome, tipo_estrutural, lado)
-    if fixa is not None:
-        return fixa
-    return obter_capacidade_minima(CATEGORIA_REFERENCIA_DISPLAY, tipo_estrutural, "Verão", rua_nome, lado)
+    return fixa if fixa and fixa > 0 else 20
 
 def calcular_pecas_totais(dados_casulo):
     return sum(dados_casulo.values()) if dados_casulo else 0
@@ -573,19 +565,18 @@ def botao_exportar_excel(df, nome_arquivo, label="📥 Baixar em Excel (.xlsx)",
 
 def calcular_fracao_ocupada(dados_casulo, tipo_estrutural, rua_nome, lado=None):
     """
-    % de ocupação real do casulo, considerando o mix de categorias/estações
-    guardado nele. Cada combinação consome capacidade proporcional ao seu
-    próprio mínimo de faixa (fração = qtd / capacidade_mínima daquela peça).
+    % de ocupação real do casulo. Decisão tomada com você: como a
+    capacidade agora é sempre a densidade fixa (não varia mais por
+    categoria/estação da peça), a conta virou uma divisão só — total de
+    peças guardadas no casulo ÷ capacidade fixa dele — em vez de somar uma
+    fração por categoria como antes.
     """
     if not dados_casulo:
         return 0.0
-    fracao = 0.0
-    for chave_combo, qtd in dados_casulo.items():
-        categoria_peca, estacao = chave_combo.split("|", 1)
-        cap_min = obter_capacidade_minima(categoria_peca, tipo_estrutural, estacao, rua_nome, lado)
-        if cap_min > 0:
-            fracao += qtd / cap_min
-    return fracao
+    cap_fixa = obter_capacidade_estimada_exibicao(tipo_estrutural, rua_nome, lado)
+    if not cap_fixa:
+        return 0.0
+    return calcular_pecas_totais(dados_casulo) / cap_fixa
 
 def obter_capacidade_estimada_segura(tipo_estrutural, rua_nome, lado=None):
     """Igual obter_capacidade_estimada_exibicao, mas nunca deixa a
@@ -3551,7 +3542,7 @@ elif st.session_state.aba_ativa_selecionada == "📥 Entrada de Dados / Abasteci
         st.dataframe(df_fixa, use_container_width=True, hide_index=True)
         botao_exportar_excel(df_fixa, "capacidade_fixa_por_rua.xlsx", key="export_fixa")
 
-        st.caption("O sistema usa sempre o valor MÍNIMO da faixa como capacidade real (ou a densidade fixa, quando existir). Meia-Estação reaproveita a tabela de Verão. Travas rígidas: P máx 6 peças, Vestidos em M máx 4 peças, em qualquer rua.")
+        st.caption("A capacidade agora é sempre a densidade fixa cadastrada por rua/tipo de casulo (e por lado, quando configurado) — não depende mais da categoria/estação da peça. Onde ainda não há densidade fixa cadastrada, o sistema usa um valor genérico (20) até você cadastrar o número real no Gerenciador.")
 
     tab_cad1, tab_cad2 = st.tabs(["✏️ Atualização de Casulo Individual", "🧹 Ações Globais na Base"])
 
