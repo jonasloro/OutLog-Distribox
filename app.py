@@ -89,6 +89,7 @@ from modules.devolucoes.pages import (
     historico as pagina_devolucoes_historico,
     indicadores as pagina_devolucoes_indicadores,
     pendencias as pagina_devolucoes_pendencias,
+    qualidade as pagina_devolucoes_qualidade,
     recebimento as pagina_devolucoes_recebimento,
     tratamento as pagina_devolucoes_tratamento,
 )
@@ -2289,20 +2290,24 @@ TELA_EXPEDICAO = "🚚 Expedição (Teste)"
 # Loja + Romaneio Entrada CD + Romaneio Entrada Anápolis → Conferência →
 # Registro → Tratamento → Histórico → Indicadores.
 telas_devolucoes = [
-    "↩️ Devoluções — Dashboard",
-    "↩️ Devoluções — Recebimento",
-    "↩️ Devoluções — Conferência",
-    "↩️ Devoluções — Pendências",
-    "↩️ Devoluções — Aguardando decisão",
-    "↩️ Devoluções — Defeitos Anápolis",
-    "↩️ Devoluções — Histórico",
-    "↩️ Devoluções — Indicadores",
+    "🏠 Devoluções — Dashboard",
+    "📥 Devoluções — Recebimento",
+    "🔎 Devoluções — Conferência",
+    "⚠️ Devoluções — Pendências",
+    "📋 Devoluções — Aguardando decisão",
+    "🩹 Devoluções — Defeitos Anápolis",
+    "🕘 Devoluções — Histórico",
+    "📊 Devoluções — Indicadores",
+]
+
+telas_qualidade = [
+    "🧪 Qualidade — Defeitos (Avaria)",
 ]
 
 # Estrutura de setores — decisão tomada com você: SGO fica em Recebimento
 # (é sobre entrada chegando), Expedição (Teste) vira parte do setor
-# Expedição de verdade em vez de botão escondido, e Qualidade/Processamento
-# ficam como setores vazios prontos pra receber telas futuras.
+# Expedição de verdade em vez de botão escondido, e Processamento fica
+# como setor vazio pronto pra receber telas futuras.
 telas_estocagem = [
     "🏠 Tela Inicial (Geral)",
     "📦 Visualizador de Casulos",
@@ -2317,11 +2322,12 @@ if st.session_state.papel_atual == "gerente":
 
 SETORES = [
     ("📥 Recebimento", ["🚚 SGO — Próximas Entradas"]),
-    ("🔎 Qualidade", []),
+    ("🔎 Qualidade", telas_qualidade),
     ("🏭 Processamento", []),
     ("📦 Estocagem", telas_estocagem),
     ("🚚 Expedição", [TELA_EXPEDICAO] + telas_devolucoes),
 ]
+
 
 opcoes_telas = [tela for _, telas in SETORES for tela in telas]
 
@@ -4005,14 +4011,14 @@ elif st.session_state.aba_ativa_selecionada in telas_devolucoes:
         )
     else:
         _pagina_devolucoes = {
-            "↩️ Devoluções — Dashboard": pagina_devolucoes_dashboard,
-            "↩️ Devoluções — Recebimento": pagina_devolucoes_recebimento,
-            "↩️ Devoluções — Conferência": pagina_devolucoes_conferencia,
-            "↩️ Devoluções — Pendências": pagina_devolucoes_pendencias,
-            "↩️ Devoluções — Aguardando decisão": pagina_devolucoes_tratamento,
-            "↩️ Devoluções — Defeitos Anápolis": pagina_devolucoes_anapolis,
-            "↩️ Devoluções — Histórico": pagina_devolucoes_historico,
-            "↩️ Devoluções — Indicadores": pagina_devolucoes_indicadores,
+            "🏠 Devoluções — Dashboard": pagina_devolucoes_dashboard,
+            "📥 Devoluções — Recebimento": pagina_devolucoes_recebimento,
+            "🔎 Devoluções — Conferência": pagina_devolucoes_conferencia,
+            "⚠️ Devoluções — Pendências": pagina_devolucoes_pendencias,
+            "📋 Devoluções — Aguardando decisão": pagina_devolucoes_tratamento,
+            "🩹 Devoluções — Defeitos Anápolis": pagina_devolucoes_anapolis,
+            "🕘 Devoluções — Histórico": pagina_devolucoes_historico,
+            "📊 Devoluções — Indicadores": pagina_devolucoes_indicadores,
         }[st.session_state.aba_ativa_selecionada]
 
         LOJAS_DEVOLUCOES = [
@@ -4027,4 +4033,25 @@ elif st.session_state.aba_ativa_selecionada in telas_devolucoes:
             _pagina_devolucoes.render(LOJAS_DEVOLUCOES, st.session_state.devolucoes_parser)
         else:
             _pagina_devolucoes.render()
+
+# Setor Qualidade — indicadores de defeito (avaria). Lê da mesma tabela que
+# a tratativa de Devoluções grava (devolucao_tratamentos, destino=AVARIA),
+# então qualquer avaria lançada em Expedição aparece aqui sozinha.
+elif st.session_state.aba_ativa_selecionada in telas_qualidade:
+    st.markdown(f"""
+    <div class="logo-container">
+        <h1 class="logo-texto">🔎 Qualidade</h1>
+        <div class="logo-sub">{st.session_state.aba_ativa_selecionada}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if not st.session_state.devolucoes_banco_preparado:
+        st.error(
+            "⚠️ Não foi possível conectar ao banco de Devoluções (Neon), de onde vêm os dados de avaria. "
+            f"Detalhe: `{st.session_state.devolucoes_erro_banco}`\n\n"
+            "Configure o secret **DATABASE_URL** (Settings → Secrets do Streamlit)."
+        )
+    else:
+        pagina_devolucoes_qualidade.render()
+
 
