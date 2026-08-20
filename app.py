@@ -334,7 +334,7 @@ TRAVA_MAXIMA_M_VESTIDOS = 4     # vestidos em casulo M
 # aqui (feminino, e os tipos GG/madeira ainda não cobertos), o sistema cai
 # para a tabela por categoria.
 CAPACIDADE_FIXA_POR_RUA_PADRAO = {
-    "Rua 02": {"aramado_P": 6},
+    "Rua 02": {"aramado_P": 6, "aramado_G": 20},
     "Rua 03": {"aramado_P": 6},
     "Rua 04": {"aramado_P": 6, "aramado_G": 10},
     "Rua 05": {"aramado_M": 6},
@@ -343,14 +343,14 @@ CAPACIDADE_FIXA_POR_RUA_PADRAO = {
     "Rua 08": {"aramado_M": {"par": 6, "impar": 8}},
     "Rua 09": {"aramado_M": 12},
     "Rua 10": {"aramado_G": 15},
-    "Rua 11": {"aramado_G": 10},
+    "Rua 11": {"aramado_G": 10, "metal_raso": 50},
     "Rua 14": {"madeira": 100, "metal_profundo": 100, "metal_raso": 100},
     "Rua 15": {"aramado_M": 7, "aramado_G": 12},
     "Rua 16": {"aramado_G": 10},
     "Rua 17": {"aramado_G": 12},
     "Rua 18": {"aramado_M": 12},
     "Rua 19": {"aramado_P": 6},
-    "Rua 20": {"aramado_P": 6},
+    "Rua 20": {"aramado_P": 6, "metal_raso": 50},
     "Rua 21": {"metal_raso": 40},
 }
 
@@ -2789,35 +2789,62 @@ elif st.session_state.aba_ativa_selecionada == "📦 Visualizador de Casulos":
 
         elif rua_selecionada == "Rua 11":
             # Corredor unilateral: só o lado PAR existe fisicamente (colunas
-            # 22 a 94), tratado internamente com chave "par" — mais as 3
-            # colunas de metal (129, 131, 133), já incluídas em cols_par por
-            # obter_lados_colunas_rua.
+            # 22 a 94), tratado internamente com chave "par". As 3 colunas
+            # de metal (129, 131, 133) são uma seção à parte — a chave delas
+            # é "impar" (definido por obter_lados_colunas_rua, que é quem
+            # constrói o espaço de chaves usado pelo estoque/ID Brasil), e
+            # os níveis são outros (metal raso = 5 níveis, G = 7), então não
+            # dá pra desenhar tudo na mesma grade. Corrigido: antes dessas
+            # mudanças, essas 3 colunas nunca apareciam em lugar nenhum.
             todas_colunas = config_rua.get("cols_par", [])
+            colunas_metal = sorted(config_rua.get("metal", []))
 
-            if not todas_colunas:
+            if not todas_colunas and not colunas_metal:
                 st.warning(f"⚠️ Não existem casulos cadastrados nesta rua ({rua_selecionada}).")
             else:
-                colunas_exemplo = selecionar_bloco_colunas(todas_colunas, 25, f"{rua_selecionada}_seq")
+                if todas_colunas:
+                    colunas_exemplo = selecionar_bloco_colunas(todas_colunas, 25, f"{rua_selecionada}_seq")
 
-                spec_ref = obter_especificacao_casulo(rua_selecionada, colunas_exemplo[0] if colunas_exemplo else 22, "par")
-                niveis_ordenados = sorted(spec_ref["niveis"])
+                    spec_ref = obter_especificacao_casulo(rua_selecionada, colunas_exemplo[0] if colunas_exemplo else 22, "par")
+                    niveis_ordenados = sorted(spec_ref["niveis"])
 
-                st.markdown(f"<p style='text-align:center; color:#8892b0; font-size:12px;'>Especificação: <b>{spec_ref['tipo_desc']}</b></p>", unsafe_allow_html=True)
+                    st.markdown(f"<p style='text-align:center; color:#8892b0; font-size:12px;'>Especificação: <b>{spec_ref['tipo_desc']}</b></p>", unsafe_allow_html=True)
 
-                st.markdown("<div class='lado-container'>", unsafe_allow_html=True)
-                st.markdown(f"<div class='lado-titulo'>Corredor Sequencial / Unilateral ({rua_selecionada})</div>", unsafe_allow_html=True)
+                    st.markdown("<div class='lado-container'>", unsafe_allow_html=True)
+                    st.markdown(f"<div class='lado-titulo'>Corredor Sequencial / Unilateral ({rua_selecionada})</div>", unsafe_allow_html=True)
 
-                renderizar_cabecalho_colunas(colunas_exemplo)
+                    renderizar_cabecalho_colunas(colunas_exemplo)
 
-                for nivel in niveis_ordenados:
-                    grid_seq = st.columns(len(colunas_exemplo) + 1)
-                    with grid_seq[0]:
-                        st.markdown(f"<div style='line-height:28px; text-align:center; font-weight:bold; color:#8892b0; font-size: 10px;'>{nivel}</div>", unsafe_allow_html=True)
-                    for idx, col_num in enumerate(colunas_exemplo):
-                        with grid_seq[idx + 1]:
-                            spec_col = obter_especificacao_casulo(rua_selecionada, col_num, "par")
-                            st.markdown(montar_html_nicho(rua_selecionada, col_num, nivel, spec_col, "par"), unsafe_allow_html=True)
-                st.markdown("</div>", unsafe_allow_html=True)
+                    for nivel in niveis_ordenados:
+                        grid_seq = st.columns(len(colunas_exemplo) + 1)
+                        with grid_seq[0]:
+                            st.markdown(f"<div style='line-height:28px; text-align:center; font-weight:bold; color:#8892b0; font-size: 10px;'>{nivel}</div>", unsafe_allow_html=True)
+                        for idx, col_num in enumerate(colunas_exemplo):
+                            with grid_seq[idx + 1]:
+                                spec_col = obter_especificacao_casulo(rua_selecionada, col_num, "par")
+                                st.markdown(montar_html_nicho(rua_selecionada, col_num, nivel, spec_col, "par"), unsafe_allow_html=True)
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+                if colunas_metal:
+                    spec_metal_ref = obter_especificacao_casulo(rua_selecionada, colunas_metal[0], "impar")
+                    niveis_metal = sorted(spec_metal_ref["niveis"])
+
+                    st.markdown(
+                        f"<p style='text-align:center; color:#8892b0; font-size:12px;'>Colunas de metal — Especificação: <b>{spec_metal_ref['tipo_desc']}</b></p>",
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown("<div class='lado-container'>", unsafe_allow_html=True)
+                    st.markdown(f"<div class='lado-titulo'>Colunas de Metal ({rua_selecionada})</div>", unsafe_allow_html=True)
+                    renderizar_cabecalho_colunas(colunas_metal)
+                    for nivel in niveis_metal:
+                        grid_metal = st.columns(len(colunas_metal) + 1)
+                        with grid_metal[0]:
+                            st.markdown(f"<div style='line-height:28px; text-align:center; font-weight:bold; color:#8892b0; font-size: 10px;'>{nivel}</div>", unsafe_allow_html=True)
+                        for idx, col_num in enumerate(colunas_metal):
+                            with grid_metal[idx + 1]:
+                                spec_col = obter_especificacao_casulo(rua_selecionada, col_num, "impar")
+                                st.markdown(montar_html_nicho(rua_selecionada, col_num, nivel, spec_col, "impar"), unsafe_allow_html=True)
+                    st.markdown("</div>", unsafe_allow_html=True)
 
         elif config_rua.get("cols_seq") and not config_rua.get("cols_impar") and not config_rua.get("cols_par"):
             # Corredor 100% sequencial/unilateral (sem lado ímpar/par
