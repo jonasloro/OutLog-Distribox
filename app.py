@@ -84,14 +84,12 @@ from modules.devolucoes.services import preparar_banco as preparar_banco_devoluc
 from modules.devolucoes.tratamento import init_tratamento_db as init_tratamento_db_devolucoes
 from modules.devolucoes.parser import ParserRomaneio as ParserRomaneioDevolucoes
 from modules.devolucoes.pages import (
-    anapolis as pagina_devolucoes_anapolis,
     configuracoes as pagina_devolucoes_configuracoes,
     dashboard as pagina_devolucoes_dashboard,
     historico as pagina_devolucoes_historico,
     indicadores as pagina_devolucoes_indicadores,
     qualidade as pagina_devolucoes_qualidade,
     recebimento as pagina_devolucoes_recebimento,
-    tratamento as pagina_devolucoes_tratamento,
 )
 
 # 1. CONFIGURAÇÃO DE PÁGINA
@@ -2346,8 +2344,6 @@ TELA_EXPEDICAO = "🚚 Expedição (Teste)"
 telas_devolucoes = [
     "🏠 Devoluções — Dashboard",
     "📥 Devoluções — Recebimento",
-    "📋 Devoluções — Aguardando decisão",
-    "🩹 Devoluções — Defeitos Anápolis",
     "🕘 Devoluções — Histórico",
     "📊 Devoluções — Indicadores",
 ]
@@ -4184,8 +4180,6 @@ elif st.session_state.aba_ativa_selecionada in telas_devolucoes:
         _pagina_devolucoes = {
             "🏠 Devoluções — Dashboard": pagina_devolucoes_dashboard,
             "📥 Devoluções — Recebimento": pagina_devolucoes_recebimento,
-            "📋 Devoluções — Aguardando decisão": pagina_devolucoes_tratamento,
-            "🩹 Devoluções — Defeitos Anápolis": pagina_devolucoes_anapolis,
             "🕘 Devoluções — Histórico": pagina_devolucoes_historico,
             "📊 Devoluções — Indicadores": pagina_devolucoes_indicadores,
         }[st.session_state.aba_ativa_selecionada]

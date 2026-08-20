@@ -5,6 +5,7 @@ from ..database import registrar_conferencia
 from ..parser import ParserRomaneio
 from ..services import comparar_documentos
 from .conferencia import formatar_tabela
+from .tratamento import render as _render_tratamento
 
 
 def _tab_recebimento(lojas: list[str], parser: ParserRomaneio) -> None:
@@ -128,16 +129,17 @@ def _tab_pendencias() -> None:
 
 
 def render(lojas: list[str], parser: ParserRomaneio) -> None:
-    st.header("📥 Recebimento, Conferência e Pendências")
+    st.header("📥 Recebimento, Conferência, Pendências e Tratativa")
 
     n_pendencias = 0
     if st.session_state.comparacao:
         n_pendencias = int((pd.DataFrame(st.session_state.comparacao)["status"] != "OK").sum())
 
-    aba_recebimento, aba_conferencia, aba_pendencias = st.tabs([
+    aba_recebimento, aba_conferencia, aba_pendencias, aba_tratativa = st.tabs([
         "📥 Recebimento",
         "🔎 Conferência",
         f"⚠️ Pendências ({n_pendencias})" if n_pendencias else "⚠️ Pendências",
+        "📋 Tratativa",
     ])
     with aba_recebimento:
         _tab_recebimento(lojas, parser)
@@ -145,3 +147,5 @@ def render(lojas: list[str], parser: ParserRomaneio) -> None:
         _tab_conferencia()
     with aba_pendencias:
         _tab_pendencias()
+    with aba_tratativa:
+        _render_tratamento()
