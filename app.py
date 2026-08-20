@@ -85,12 +85,10 @@ from modules.devolucoes.tratamento import init_tratamento_db as init_tratamento_
 from modules.devolucoes.parser import ParserRomaneio as ParserRomaneioDevolucoes
 from modules.devolucoes.pages import (
     anapolis as pagina_devolucoes_anapolis,
-    conferencia as pagina_devolucoes_conferencia,
     configuracoes as pagina_devolucoes_configuracoes,
     dashboard as pagina_devolucoes_dashboard,
     historico as pagina_devolucoes_historico,
     indicadores as pagina_devolucoes_indicadores,
-    pendencias as pagina_devolucoes_pendencias,
     qualidade as pagina_devolucoes_qualidade,
     recebimento as pagina_devolucoes_recebimento,
     tratamento as pagina_devolucoes_tratamento,
@@ -2348,8 +2346,6 @@ TELA_EXPEDICAO = "🚚 Expedição (Teste)"
 telas_devolucoes = [
     "🏠 Devoluções — Dashboard",
     "📥 Devoluções — Recebimento",
-    "🔎 Devoluções — Conferência",
-    "⚠️ Devoluções — Pendências",
     "📋 Devoluções — Aguardando decisão",
     "🩹 Devoluções — Defeitos Anápolis",
     "🕘 Devoluções — Histórico",
@@ -4188,8 +4184,6 @@ elif st.session_state.aba_ativa_selecionada in telas_devolucoes:
         _pagina_devolucoes = {
             "🏠 Devoluções — Dashboard": pagina_devolucoes_dashboard,
             "📥 Devoluções — Recebimento": pagina_devolucoes_recebimento,
-            "🔎 Devoluções — Conferência": pagina_devolucoes_conferencia,
-            "⚠️ Devoluções — Pendências": pagina_devolucoes_pendencias,
             "📋 Devoluções — Aguardando decisão": pagina_devolucoes_tratamento,
             "🩹 Devoluções — Defeitos Anápolis": pagina_devolucoes_anapolis,
             "🕘 Devoluções — Histórico": pagina_devolucoes_historico,

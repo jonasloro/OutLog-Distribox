@@ -7,3 +7,4 @@ openpyxl
 psycopg2-binary
 requests
 psycopg[binary]
+plotly
