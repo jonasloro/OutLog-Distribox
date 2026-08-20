@@ -78,6 +78,8 @@ from core.relatorios_pdf import extrair_totais_por_grupo_pdf, extrair_baixas_rom
 # Módulo de devoluções (laboratório https://github.com/jonasloro/testes-
 # expedicao-devolucoes, já integrado aqui). Usa o Neon PostgreSQL, separado
 # do Supabase do sistema principal — precisa do secret DATABASE_URL.
+from modules.devolucoes.database import listar_devolucoes
+from modules.devolucoes.tratamento import listar_avarias
 from modules.devolucoes.services import preparar_banco as preparar_banco_devolucoes
 from modules.devolucoes.tratamento import init_tratamento_db as init_tratamento_db_devolucoes
 from modules.devolucoes.parser import ParserRomaneio as ParserRomaneioDevolucoes
@@ -1744,7 +1746,7 @@ if 'grade_id_brasil' not in st.session_state:
 if 'busca_destaque' not in st.session_state:
     st.session_state.busca_destaque = None
 if 'aba_ativa_selecionada' not in st.session_state:
-    st.session_state.aba_ativa_selecionada = "🏠 Tela Inicial (Geral)"
+    st.session_state.aba_ativa_selecionada = "🏠 Visão Geral — Todos os Setores"
 
 if 'usuarios_cadastrados' not in st.session_state:
     usuarios_bd = carregar_usuarios_do_banco()
@@ -2358,12 +2360,18 @@ telas_qualidade = [
     "🧪 Qualidade — Defeitos (Avaria)",
 ]
 
+telas_visao_geral = [
+    "🏠 Visão Geral — Todos os Setores",
+]
+
 # Estrutura de setores — decisão tomada com você: SGO fica em Recebimento
 # (é sobre entrada chegando), Expedição (Teste) vira parte do setor
 # Expedição de verdade em vez de botão escondido, e Processamento fica
-# como setor vazio pronto pra receber telas futuras.
+# como setor vazio pronto pra receber telas futuras. "Visão Geral" é o
+# setor novo que junta um resumo de todo mundo — e é onde o app abre por
+# padrão agora, em vez de cair direto no Dashboard Estocagem.
 telas_estocagem = [
-    "🏠 Tela Inicial (Geral)",
+    "📊 Dashboard Estocagem",
     "📦 Visualizador de Casulos",
     "🔍 Consulta Rápida de Casulos",
     "📊 Estatísticas de Casulos",
@@ -2375,6 +2383,7 @@ if st.session_state.papel_atual == "gerente":
     telas_estocagem.append("🛠️ Gerenciador (Admin)")
 
 SETORES = [
+    ("🏠 Visão Geral", telas_visao_geral),
     ("📥 Recebimento", ["🚚 SGO — Próximas Entradas"]),
     ("🔎 Qualidade", telas_qualidade),
     ("🏭 Processamento", []),
@@ -2386,7 +2395,8 @@ SETORES = [
 opcoes_telas = [tela for _, telas in SETORES for tela in telas]
 
 if st.session_state.aba_ativa_selecionada not in opcoes_telas:
-    st.session_state.aba_ativa_selecionada = "🏠 Tela Inicial (Geral)"
+    st.session_state.aba_ativa_selecionada = "🏠 Visão Geral — Todos os Setores"
+
 
 if "primeira_carga_feita" not in st.session_state:
     st.session_state.primeira_carga_feita = False
@@ -2492,59 +2502,59 @@ st.markdown(f"""
 # ==========================================
 # TELA 1: TELA INICIAL (PAINEL GERAL)
 # ==========================================
-if st.session_state.aba_ativa_selecionada == "🏠 Tela Inicial (Geral)":
-    st.markdown("<h3 style='text-align: center; color: #ffcc00;'>📊 Painel Geral de Ocupação</h3>", unsafe_allow_html=True)
+def calcular_classe_cor_ocupacao(pct):
+    if pct == 0: return "cor-verde"
+    elif pct < 50: return "cor-verde"
+    elif pct <= 80: return "cor-amarelo"
+    elif pct < 100: return "cor-laranja"
+    else: return "cor-vermelho"
 
-    def calcular_estatisticas_rua(rua_nome):
-        """Retorna (soma_fracoes, contagem, soma_pecas, casulos_livres) pra
-        uma rua. Usa a grade real da ID Brasil quando existir sincronização
-        pra essa rua (e ela não estiver na lista de exclusão); senão cai
-        pro lançamento manual, como o app sempre fez."""
-        grade_rua = st.session_state.grade_id_brasil.get(rua_nome)
-        if USAR_GRADE_DINAMICA_ID_BRASIL and grade_rua and rua_nome not in RUAS_FORA_DO_VISUALIZADOR_ID_BRASIL:
-            soma_fracoes, soma_pecas, livres = 0.0, 0, 0
-            for (col_num, nivel), dado in grade_rua.items():
-                qtd = dado["quantidade"]
-                lado = "impar" if col_num % 2 == 1 else "par"
-                spec = obter_especificacao_casulo(rua_nome, col_num, lado)
-                tipo_estrutural = spec.get("tipo_estrutural") or "aramado_P"
-                capacidade = obter_capacidade_estimada_segura(tipo_estrutural, rua_nome)
-                soma_fracoes += (qtd / capacidade) if capacidade else 0.0
-                soma_pecas += qtd
-                if qtd == 0:
-                    livres += 1
-            return soma_fracoes, len(grade_rua), soma_pecas, livres
+def calcular_estatisticas_rua(rua_nome):
+    """Retorna (soma_fracoes, contagem, soma_pecas, casulos_livres) pra
+    uma rua. Usa a grade real da ID Brasil quando existir sincronização
+    pra essa rua (e ela não estiver na lista de exclusão); senão cai
+    pro lançamento manual, como o app sempre fez."""
+    grade_rua = st.session_state.grade_id_brasil.get(rua_nome)
+    if USAR_GRADE_DINAMICA_ID_BRASIL and grade_rua and rua_nome not in RUAS_FORA_DO_VISUALIZADOR_ID_BRASIL:
+        soma_fracoes, soma_pecas, livres = 0.0, 0, 0
+        for (col_num, nivel), dado in grade_rua.items():
+            qtd = dado["quantidade"]
+            lado = "impar" if col_num % 2 == 1 else "par"
+            spec = obter_especificacao_casulo(rua_nome, col_num, lado)
+            tipo_estrutural = spec.get("tipo_estrutural") or "aramado_P"
+            capacidade = obter_capacidade_estimada_segura(tipo_estrutural, rua_nome)
+            soma_fracoes += (qtd / capacidade) if capacidade else 0.0
+            soma_pecas += qtd
+            if qtd == 0:
+                livres += 1
+        return soma_fracoes, len(grade_rua), soma_pecas, livres
 
-        soma_fracoes, soma_pecas, livres, contagem = 0.0, 0, 0, 0
-        for chave, dados_casulo in st.session_state.base_dados_cd.items():
-            r_n, lado_r, c_r, n_r = chave.split("|")
-            if r_n == rua_nome:
-                l_param = "par" if rua_nome == "Rua 11" else ("impar" if lado_r == "seq" else lado_r)
-                spec_r = obter_especificacao_casulo(rua_nome, int(c_r), l_param)
-                qtd_id_brasil = st.session_state.quantidades_id_brasil.get(chave)
-                if qtd_id_brasil is not None:
-                    # Mesma regra do Visualizador: quando existe dado real
-                    # sincronizado pra esse casulo, ele manda — sem isso, a
-                    # Visão Geral ficava presa só no lançamento manual.
-                    capacidade_r = obter_capacidade_estimada_segura(spec_r["tipo_estrutural"], rua_nome)
-                    soma_fracoes += (qtd_id_brasil / capacidade_r) if capacidade_r else 0.0
-                    pecas_casulo = qtd_id_brasil
-                else:
-                    soma_fracoes += calcular_fracao_ocupada(dados_casulo, spec_r["tipo_estrutural"], rua_nome)
-                    pecas_casulo = calcular_pecas_totais(dados_casulo)
-                soma_pecas += pecas_casulo
-                contagem += 1
-                if pecas_casulo == 0:
-                    livres += 1
-        return soma_fracoes, contagem, soma_pecas, livres
+    soma_fracoes, soma_pecas, livres, contagem = 0.0, 0, 0, 0
+    for chave, dados_casulo in st.session_state.base_dados_cd.items():
+        r_n, lado_r, c_r, n_r = chave.split("|")
+        if r_n == rua_nome:
+            l_param = "par" if rua_nome == "Rua 11" else ("impar" if lado_r == "seq" else lado_r)
+            spec_r = obter_especificacao_casulo(rua_nome, int(c_r), l_param)
+            qtd_id_brasil = st.session_state.quantidades_id_brasil.get(chave)
+            if qtd_id_brasil is not None:
+                # Mesma regra do Visualizador: quando existe dado real
+                # sincronizado pra esse casulo, ele manda — sem isso, a
+                # Visão Geral ficava presa só no lançamento manual.
+                capacidade_r = obter_capacidade_estimada_segura(spec_r["tipo_estrutural"], rua_nome)
+                soma_fracoes += (qtd_id_brasil / capacidade_r) if capacidade_r else 0.0
+                pecas_casulo = qtd_id_brasil
+            else:
+                soma_fracoes += calcular_fracao_ocupada(dados_casulo, spec_r["tipo_estrutural"], rua_nome)
+                pecas_casulo = calcular_pecas_totais(dados_casulo)
+            soma_pecas += pecas_casulo
+            contagem += 1
+            if pecas_casulo == 0:
+                livres += 1
+    return soma_fracoes, contagem, soma_pecas, livres
 
-    def obter_classe_cor(pct):
-        if pct == 0: return "cor-verde"
-        elif pct < 50: return "cor-verde"
-        elif pct <= 80: return "cor-amarelo"
-        elif pct < 100: return "cor-laranja"
-        else: return "cor-vermelho"
-
+def calcular_resumo_estocagem():
+    """Resumo agregado de ocupação de casulos, usado tanto pelo Dashboard
+    Estocagem quanto pela Visão Geral (todos os setores)."""
     ruas_nomes = [r for r in ESTRUTURA_CD.keys() if ESTRUTURA_CD[r].get("tipo") != "Inexistente"]
 
     total_casulos = 0
@@ -2556,13 +2566,81 @@ if st.session_state.aba_ativa_selecionada == "🏠 Tela Inicial (Geral)":
     for rua in ruas_nomes:
         soma_fracoes_rua, contagem_rua, soma_pecas_rua, livres_rua = calcular_estatisticas_rua(rua)
         pct_rua = (soma_fracoes_rua / contagem_rua * 100) if contagem_rua > 0 else 0.0
-        estatisticas_por_rua.append({"Rua": rua, "Ocupação (%)": round(pct_rua, 1)})
+        estatisticas_por_rua.append({"Rua": rua, "Ocupação (%)": round(pct_rua, 1), "Casulos Zerados": livres_rua})
         total_casulos += contagem_rua
         soma_fracoes_geral += soma_fracoes_rua
         total_pecas_atuais += soma_pecas_rua
         casulos_livres += livres_rua
 
     pct_geral = (soma_fracoes_geral / total_casulos * 100) if total_casulos > 0 else 0.0
+    return total_casulos, pct_geral, casulos_livres, total_pecas_atuais, estatisticas_por_rua
+
+if st.session_state.aba_ativa_selecionada == "🏠 Visão Geral — Todos os Setores":
+    st.markdown("<h3 style='text-align: center; color: #ffcc00;'>🏠 Visão Geral — Todos os Setores</h3>", unsafe_allow_html=True)
+
+    total_casulos, pct_geral, casulos_livres, total_pecas_atuais, _ = calcular_resumo_estocagem()
+
+    st.markdown("<h4 style='color: #ffcc00;'>📦 Estocagem</h4>", unsafe_allow_html=True)
+    vg_col1, vg_col2, vg_col3, vg_col4 = st.columns(4)
+    with vg_col1: st.markdown(f"<div class='card-dashboard'><h5>Total Casulos</h5><h2>{total_casulos:,}</h2></div>", unsafe_allow_html=True)
+    with vg_col2: st.markdown(f"<div class='card-dashboard'><h5>Ocupação Média</h5><h2>{pct_geral:.1f}%</h2></div>", unsafe_allow_html=True)
+    with vg_col3: st.markdown(f"<div class='card-dashboard'><h5>Casulos Zerados</h5><h2>{casulos_livres:,}</h2></div>", unsafe_allow_html=True)
+    with vg_col4: st.markdown(f"<div class='card-dashboard'><h5>Peças Armazenadas</h5><h2>{total_pecas_atuais:,} un</h2></div>", unsafe_allow_html=True)
+    if st.button("Ver Dashboard Estocagem completo →", key="vg_ir_estocagem"):
+        st.session_state.aba_ativa_selecionada = "📊 Dashboard Estocagem"
+        st.rerun()
+
+    st.write("---")
+    st.markdown("<h4 style='color: #ffcc00;'>↩️ Devoluções</h4>", unsafe_allow_html=True)
+    if not st.session_state.devolucoes_banco_preparado:
+        st.info("Banco de Devoluções (Neon) ainda não configurado — configure o secret DATABASE_URL pra ver o resumo aqui.")
+    else:
+        try:
+            registros_dev = listar_devolucoes()
+        except Exception as e:
+            registros_dev = []
+            st.warning(f"Não foi possível carregar o resumo de Devoluções: {e}")
+        vg_dev1, vg_dev2, vg_dev3 = st.columns(3)
+        with vg_dev1: st.markdown(f"<div class='card-dashboard'><h5>Devoluções Registradas</h5><h2>{len(registros_dev):,}</h2></div>", unsafe_allow_html=True)
+        with vg_dev2:
+            aguardando = sum(1 for r in registros_dev if r["status"] in {"AGUARDANDO TRATAMENTO", "DIVERGENTE", "CONFERIDA"})
+            st.markdown(f"<div class='card-dashboard'><h5>Aguardando Tratamento</h5><h2>{aguardando:,}</h2></div>", unsafe_allow_html=True)
+        with vg_dev3:
+            concluidas = sum(1 for r in registros_dev if r["status"] == "CONCLUÍDA")
+            st.markdown(f"<div class='card-dashboard'><h5>Concluídas</h5><h2>{concluidas:,}</h2></div>", unsafe_allow_html=True)
+        if st.button("Ver Devoluções →", key="vg_ir_devolucoes"):
+            st.session_state.aba_ativa_selecionada = "🏠 Devoluções — Dashboard"
+            st.rerun()
+
+    st.write("---")
+    st.markdown("<h4 style='color: #ffcc00;'>🔎 Qualidade</h4>", unsafe_allow_html=True)
+    if not st.session_state.devolucoes_banco_preparado:
+        st.info("Banco de Devoluções (Neon) ainda não configurado — configure o secret DATABASE_URL pra ver o resumo aqui.")
+    else:
+        try:
+            avarias_geral = listar_avarias()
+        except Exception as e:
+            avarias_geral = []
+            st.warning(f"Não foi possível carregar o resumo de Qualidade: {e}")
+        total_pecas_avaria = sum(int(r["quantidade"]) for r in avarias_geral)
+        vg_qual1, vg_qual2 = st.columns(2)
+        with vg_qual1: st.markdown(f"<div class='card-dashboard'><h5>Peças em Avaria</h5><h2>{total_pecas_avaria:,}</h2></div>", unsafe_allow_html=True)
+        with vg_qual2:
+            devolucoes_com_avaria = len({r["devolucao_id"] for r in avarias_geral})
+            st.markdown(f"<div class='card-dashboard'><h5>Devoluções com Avaria</h5><h2>{devolucoes_com_avaria:,}</h2></div>", unsafe_allow_html=True)
+        if st.button("Ver Qualidade →", key="vg_ir_qualidade"):
+            st.session_state.aba_ativa_selecionada = "🧪 Qualidade — Defeitos (Avaria)"
+            st.rerun()
+
+    st.caption("Recebimento (SGO), Processamento e Expedição (Teste) ainda não têm indicador resumido aqui — acesse pelo menu lateral.")
+
+# ==========================================
+# TELA: DASHBOARD ESTOCAGEM (ex-"Tela Inicial (Geral)")
+# ==========================================
+elif st.session_state.aba_ativa_selecionada == "📊 Dashboard Estocagem":
+    st.markdown("<h3 style='text-align: center; color: #ffcc00;'>📊 Painel Geral de Ocupação</h3>", unsafe_allow_html=True)
+
+    total_casulos, pct_geral, casulos_livres, total_pecas_atuais, estatisticas_por_rua = calcular_resumo_estocagem()
 
     kcol1, kcol2, kcol3, kcol4 = st.columns(4)
     with kcol1: st.markdown(f"<div class='card-dashboard'><h5>Total Casulos</h5><h2>{total_casulos:,}</h2></div>", unsafe_allow_html=True)
@@ -2579,8 +2657,9 @@ if st.session_state.aba_ativa_selecionada == "🏠 Tela Inicial (Geral)":
     for idx, item_rua in enumerate(estatisticas_por_rua):
         rua = item_rua["Rua"]
         pct_rua = item_rua["Ocupação (%)"]
+        zerados_rua = item_rua["Casulos Zerados"]
         col_alvo = bloco_cols[idx % 3]
-        classe_cor = obter_classe_cor(pct_rua)
+        classe_cor = calcular_classe_cor_ocupacao(pct_rua)
 
         with col_alvo:
             st.markdown(f"""
@@ -2590,6 +2669,7 @@ if st.session_state.aba_ativa_selecionada == "🏠 Tela Inicial (Geral)":
                 <div class="bar-container">
                     <div class="bar-fill {classe_cor}" style="width: {pct_rua}%;"></div>
                 </div>
+                <div style="font-size: 11px; margin-top: 4px; color: #8892b0;">🕳️ {zerados_rua} casulo{'s' if zerados_rua != 1 else ''} zerado{'s' if zerados_rua != 1 else ''}</div>
             </div>
             """, unsafe_allow_html=True)
             if st.button("🔍 Ver casulos", key=f"btn_mapa_calor_{rua}", use_container_width=True):
@@ -2603,7 +2683,7 @@ if st.session_state.aba_ativa_selecionada == "🏠 Tela Inicial (Geral)":
     st.markdown("<h4 style='text-align: center; color: #ffcc00;'>📈 Ranking de Ocupação por Corredor (%)</h4>", unsafe_allow_html=True)
 
     if dados_ranking:
-        df_ranking = pd.DataFrame(dados_ranking).set_index("Rua")
+        df_ranking = pd.DataFrame(dados_ranking)[["Rua", "Ocupação (%)"]].set_index("Rua")
         st.bar_chart(df_ranking, color="#ffcc00")
 
         df_ordenado = pd.DataFrame(dados_ranking).sort_values("Ocupação (%)", ascending=False)
