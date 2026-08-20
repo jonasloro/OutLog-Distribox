@@ -61,6 +61,38 @@ try:
 except ImportError:
     DB_LIBS_DISPONIVEIS = False
 
+# Funções extraídas para core/ (ver README.md "Sobre a divisão do
+# app.py"): conexão com o banco principal, autenticação de usuários e
+# extração de dados de PDF. Mantidas com os MESMOS NOMES para não exigir
+# nenhuma outra mudança no resto deste arquivo.
+from core.database import _obter_config_bd, obter_conexao_bd, testar_conexao_bd
+from core.usuarios import (
+    gerar_hash_senha,
+    verificar_senha,
+    carregar_usuarios_do_banco,
+    criar_usuario_no_banco,
+    remover_usuario_no_banco,
+)
+from core.relatorios_pdf import extrair_totais_por_grupo_pdf, extrair_baixas_romaneio_pdf
+
+# Módulo de devoluções (laboratório https://github.com/jonasloro/testes-
+# expedicao-devolucoes, já integrado aqui). Usa o Neon PostgreSQL, separado
+# do Supabase do sistema principal — precisa do secret DATABASE_URL.
+from modules.devolucoes.services import preparar_banco as preparar_banco_devolucoes
+from modules.devolucoes.tratamento import init_tratamento_db as init_tratamento_db_devolucoes
+from modules.devolucoes.parser import ParserRomaneio as ParserRomaneioDevolucoes
+from modules.devolucoes.pages import (
+    anapolis as pagina_devolucoes_anapolis,
+    conferencia as pagina_devolucoes_conferencia,
+    configuracoes as pagina_devolucoes_configuracoes,
+    dashboard as pagina_devolucoes_dashboard,
+    historico as pagina_devolucoes_historico,
+    indicadores as pagina_devolucoes_indicadores,
+    pendencias as pagina_devolucoes_pendencias,
+    recebimento as pagina_devolucoes_recebimento,
+    tratamento as pagina_devolucoes_tratamento,
+)
+
 # 1. CONFIGURAÇÃO DE PÁGINA
 st.set_page_config(
     page_title="OutLog - Sistema de Gestão por Peças",
@@ -712,77 +744,8 @@ def renderizar_cabecalho_colunas(lista_colunas):
 # Também aceitamos a configuração antiga [postgres], caso ela ainda exista,
 # para não quebrar instalações antigas durante a transição.
 
-def _obter_config_bd():
-    """Retorna as credenciais do banco a partir dos Secrets do Streamlit."""
-    try:
-        if "SUPABASE_HOST" in st.secrets:
-            return {
-                "host": st.secrets["SUPABASE_HOST"],
-                "port": int(st.secrets.get("SUPABASE_PORT", 5432)),
-                "dbname": st.secrets.get("SUPABASE_DATABASE", "postgres"),
-                "user": st.secrets["SUPABASE_USER"],
-                "password": st.secrets["SUPABASE_PASSWORD"],
-            }
-
-        if "postgres" in st.secrets:
-            cfg = st.secrets["postgres"]
-            return {
-                "host": cfg["host"],
-                "port": int(cfg.get("port", 5432)),
-                "dbname": cfg.get("dbname", "postgres"),
-                "user": cfg["user"],
-                "password": cfg["password"],
-            }
-    except Exception as e:
-        st.session_state.ultimo_erro_bd = f"Secrets do banco inválidos/incompletos: {e}"
-        return None
-
-    st.session_state.ultimo_erro_bd = (
-        "Secrets do banco não configurados. Use SUPABASE_HOST, SUPABASE_PORT, "
-        "SUPABASE_DATABASE, SUPABASE_USER e SUPABASE_PASSWORD em "
-        "Settings → Secrets do Streamlit."
-    )
-    return None
-
-def obter_conexao_bd():
-    if not PSYCOPG2_DISPONIVEL:
-        st.session_state.ultimo_erro_bd = (
-            "biblioteca 'psycopg2-binary' não instalada — "
-            "adicione psycopg2-binary ao requirements.txt do repositório"
-        )
-        return None
-
-    cfg = _obter_config_bd()
-    if cfg is None:
-        return None
-
-    try:
-        conn = psycopg2.connect(
-            host=cfg["host"],
-            port=cfg["port"],
-            dbname=cfg["dbname"],
-            user=cfg["user"],
-            password=cfg["password"],
-            sslmode="require",
-            connect_timeout=10,
-        )
-        st.session_state.ultimo_erro_bd = None
-        return conn
-    except Exception as e:
-        st.session_state.ultimo_erro_bd = f"falha ao conectar no Postgres/Supabase: {e}"
-        return None
-
-def testar_conexao_bd():
-    """Testa a conexão e fecha o socket para não deixar conexões penduradas."""
-    conn = obter_conexao_bd()
-    if conn is None:
-        return False
-    try:
-        conn.close()
-        return True
-    except Exception as e:
-        st.session_state.ultimo_erro_bd = f"falha ao fechar conexão de teste: {e}"
-        return False
+# _obter_config_bd / obter_conexao_bd / testar_conexao_bd agora moraram em
+# core/database.py (importadas no topo deste arquivo).
 
 # ==========================================
 # INTEGRAÇÃO API ID BRASIL — SOMENTE LEITURA (GET)
@@ -1460,84 +1423,8 @@ def salvar_lote_no_banco(lista_tuplas):
         return False
 
 # ==========================================
-# SENHA COM HASH (sem depender de biblioteca externa)
-# ==========================================
-def gerar_hash_senha(senha_texto_puro):
-    """PBKDF2-HMAC-SHA256 com salt aleatório — não precisa de bcrypt/passlib,
-    só o que já vem no Python padrão."""
-    salt = os.urandom(16)
-    hash_bytes = hashlib.pbkdf2_hmac('sha256', senha_texto_puro.encode('utf-8'), salt, 200_000)
-    return binascii.hexlify(salt).decode() + ':' + binascii.hexlify(hash_bytes).decode()
-
-def verificar_senha(senha_texto_puro, hash_armazenado):
-    try:
-        salt_hex, hash_hex = hash_armazenado.split(':')
-        salt = binascii.unhexlify(salt_hex)
-        hash_esperado = binascii.unhexlify(hash_hex)
-        hash_calculado = hashlib.pbkdf2_hmac('sha256', senha_texto_puro.encode('utf-8'), salt, 200_000)
-        return hmac.compare_digest(hash_calculado, hash_esperado)
-    except Exception:
-        return False
-
-# ==========================================
-# USUÁRIOS NO BANCO
-# ==========================================
-def carregar_usuarios_do_banco():
-    conn = obter_conexao_bd()
-    if conn is None:
-        return None
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT usuario, senha_hash, papel FROM usuarios")
-            linhas = cur.fetchall()
-        conn.close()
-    except Exception as e:
-        try:
-            conn.close()
-        except Exception:
-            pass
-        st.session_state.ultimo_erro_bd = str(e)
-        return None
-    return {usuario: {"senha_hash": senha_hash, "papel": papel} for usuario, senha_hash, papel in linhas}
-
-def criar_usuario_no_banco(usuario, senha_hash, papel):
-    conn = obter_conexao_bd()
-    if conn is None:
-        return None
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO usuarios (usuario, senha_hash, papel, criado_em) VALUES (%s, %s, %s, now())",
-                (usuario, senha_hash, papel)
-            )
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        try:
-            conn.close()
-        except Exception:
-            pass
-        st.session_state.ultimo_erro_bd = str(e)
-        return False
-
-def remover_usuario_no_banco(usuario):
-    conn = obter_conexao_bd()
-    if conn is None:
-        return None
-    try:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM usuarios WHERE usuario=%s", (usuario,))
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        try:
-            conn.close()
-        except Exception:
-            pass
-        st.session_state.ultimo_erro_bd = str(e)
-        return False
+# SENHA COM HASH e USUÁRIOS NO BANCO agora moram em core/usuarios.py
+# (importadas no topo deste arquivo).
 
 # ==========================================
 # HISTÓRICO DE MOVIMENTAÇÕES (AUDITORIA)
@@ -1661,105 +1548,8 @@ def carregar_ultimo_relatorio_do_banco():
         st.session_state.ultimo_erro_bd = str(e)
         return None, None
 
-def extrair_totais_por_grupo_pdf(arquivo_pdf):
-    """
-    Lê um PDF no formato 'Resumo de Estoque do Grupo' (agrupado por GRUPO,
-    detalhado por MARCA) e retorna uma lista de (nome_grupo, quantidade) com
-    o SUBTOTAL de peças de cada grupo — ignora os valores de custo/venda e
-    o detalhe por marca, que não são necessários pro planejamento de casulos.
-    """
-    leitor = pypdf.PdfReader(arquivo_pdf)
-    texto_completo = ""
-    for pagina in leitor.pages:
-        texto_completo += pagina.extract_text(extraction_mode="layout") + "\n"
-
-    padrao_dinheiro = re.compile(r'^\d{1,3}(\.\d{3})*,\d{2}$')
-    padrao_metadado = re.compile(r'(RESUMO DE ESTOQUE|Agrupado por|Empresas:|DESCRIÇÃO|Pag\.:|Detalhado por|Emitir P\.|^\d{2}\s*-\s*CD)', re.I)
-
-    def achar_qtd(lista_tokens):
-        for t in lista_tokens:
-            if padrao_dinheiro.match(t):
-                continue
-            if re.match(r'^\d+(\.\d{3})*$', t):
-                return int(t.replace(".", ""))
-        return None
-
-    grupos = []
-    grupo_atual = None
-
-    for linha_bruta in texto_completo.split("\n"):
-        linha = linha_bruta.strip()
-        if not linha:
-            continue
-        if padrao_metadado.search(linha):
-            continue
-
-        tokens = linha.split()
-        if not tokens:
-            continue
-        primeiro_upper = tokens[0].upper()
-        n_valores_dinheiro = sum(1 for t in tokens if padrao_dinheiro.match(t))
-
-        if primeiro_upper == "VAZIO":
-            qtd = achar_qtd(tokens[1:])
-            if qtd is not None:
-                grupos.append(("Vazio (sem grupo)", qtd))
-            continue
-
-        if primeiro_upper == "SUBTOTAL":
-            qtd = achar_qtd(tokens[1:])
-            if qtd is not None and grupo_atual:
-                grupos.append((grupo_atual, qtd))
-            continue
-
-        if primeiro_upper == "TOTAL":
-            continue
-
-        if n_valores_dinheiro >= 2:
-            continue  # linha de marca (dado), não é cabeçalho de grupo
-
-        grupo_atual = linha
-
-    return grupos
-
-def extrair_baixas_romaneio_pdf(arquivo_pdf):
-    """
-    Parser PROVISÓRIO para o romaneio de separação, usado só na tela de
-    Expedição (modo teste). Ainda não temos um romaneio real de exemplo, então
-    isso procura, em cada linha do PDF, um endereço de casulo no mesmo padrão
-    usado no Localizador Global ('NNN-L-NNN', ex: 003-B-009) seguido de uma
-    quantidade (o primeiro número inteiro depois do endereço na mesma linha).
-    Quando tivermos um romaneio real, este parser deve ser ajustado pro layout exato.
-    """
-    leitor = pypdf.PdfReader(arquivo_pdf)
-    texto_completo = ""
-    for pagina in leitor.pages:
-        texto_completo += (pagina.extract_text(extraction_mode="layout") or "") + "\n"
-
-    padrao_endereco = re.compile(r'\b(\d{2,3})\s*-\s*([A-Za-z])\s*-\s*(\d{2,3})\b')
-
-    linhas_extraidas = []
-    for linha_bruta in texto_completo.split("\n"):
-        linha = linha_bruta.strip()
-        if not linha:
-            continue
-        m_end = padrao_endereco.search(linha)
-        if not m_end:
-            continue
-        resto_linha = linha[m_end.end():]
-        m_qtd = re.search(r'\d+', resto_linha)
-        if not m_qtd:
-            continue
-        num_rua_str, nivel_str, col_str = m_end.groups()
-        linhas_extraidas.append({
-            "endereco": f"{int(num_rua_str):03d}-{nivel_str.upper()}-{int(col_str):03d}",
-            "rua_num": int(num_rua_str),
-            "nivel": nivel_str.upper(),
-            "coluna": int(col_str),
-            "quantidade": int(m_qtd.group())
-        })
-
-    return linhas_extraidas
+# extrair_totais_por_grupo_pdf e extrair_baixas_romaneio_pdf agora moram em
+# core/relatorios_pdf.py (importadas no topo deste arquivo).
 
 def resolver_chave_por_endereco(rua_num, nivel, coluna):
     """
@@ -1895,6 +1685,32 @@ if 'relatorio_estoque_grupos' not in st.session_state:
     else:
         st.session_state.relatorio_estoque_grupos = None  # lista de (grupo, qtd)
         st.session_state.relatorio_estoque_meta = None  # {"nome_arquivo":..., "importado_em":...}
+
+# Módulo de Devoluções — banco Neon próprio (secret DATABASE_URL), separado
+# do Supabase do resto do app. Erros aqui (ex.: secret ainda não
+# configurado) ficam guardados em session_state em vez de derrubar o app
+# inteiro — as próprias telas de Devoluções avisam o usuário.
+if 'devolucoes_banco_preparado' not in st.session_state:
+    try:
+        preparar_banco_devolucoes()
+        init_tratamento_db_devolucoes()
+        st.session_state.devolucoes_banco_preparado = True
+        st.session_state.devolucoes_erro_banco = None
+    except Exception as e:
+        st.session_state.devolucoes_banco_preparado = False
+        st.session_state.devolucoes_erro_banco = str(e)
+if 'devolucoes_parser' not in st.session_state:
+    st.session_state.devolucoes_parser = ParserRomaneioDevolucoes()
+for _chave_devolucoes, _valor_devolucoes in {
+    "comparacao": None,
+    "loja": None,
+    "entrada": None,
+    "anapolis_romaneio": None,
+    "loja_selecionada": None,
+    "registrado_id": None,
+}.items():
+    if _chave_devolucoes not in st.session_state:
+        st.session_state[_chave_devolucoes] = _valor_devolucoes
 
 
 # ==========================================
@@ -2432,6 +2248,21 @@ st.sidebar.markdown("<h2 style='color: #ffcc00; text-align: center;'>⚙️ NAVE
 
 TELA_EXPEDICAO = "🚚 Expedição (Teste)"
 
+# Telas do módulo de Devoluções (laboratório https://github.com/jonasloro/
+# testes-expedicao-devolucoes, integrado aqui). Fluxo oficial: Romaneio da
+# Loja + Romaneio Entrada CD + Romaneio Entrada Anápolis → Conferência →
+# Registro → Tratamento → Histórico → Indicadores.
+telas_devolucoes = [
+    "↩️ Devoluções — Dashboard",
+    "↩️ Devoluções — Recebimento",
+    "↩️ Devoluções — Conferência",
+    "↩️ Devoluções — Pendências",
+    "↩️ Devoluções — Aguardando decisão",
+    "↩️ Devoluções — Defeitos Anápolis",
+    "↩️ Devoluções — Histórico",
+    "↩️ Devoluções — Indicadores",
+]
+
 # Estrutura de setores — decisão tomada com você: SGO fica em Recebimento
 # (é sobre entrada chegando), Expedição (Teste) vira parte do setor
 # Expedição de verdade em vez de botão escondido, e Qualidade/Processamento
@@ -2453,7 +2284,7 @@ SETORES = [
     ("🔎 Qualidade", []),
     ("🏭 Processamento", []),
     ("📦 Estocagem", telas_estocagem),
-    ("🚚 Expedição", [TELA_EXPEDICAO]),
+    ("🚚 Expedição", [TELA_EXPEDICAO] + telas_devolucoes),
 ]
 
 opcoes_telas = [tela for _, telas in SETORES for tela in telas]
@@ -4033,3 +3864,50 @@ elif st.session_state.aba_ativa_selecionada == "🛠️ Gerenciador (Admin)":
                         st.session_state.configuracoes_cd_carregadas=True; st.success("Densidades fixas salvas e recarregadas com sucesso."); st.rerun()
                     else:
                         st.error(f"❌ Não foi possível salvar as densidades fixas. `{st.session_state.get('ultimo_erro_bd')}`")
+
+# ==========================================
+# MÓDULO DE DEVOLUÇÕES
+# ==========================================
+# Laboratório https://github.com/jonasloro/testes-expedicao-devolucoes,
+# integrado aqui. Usa o Neon PostgreSQL (secret DATABASE_URL), separado do
+# Supabase do resto do app — ver preparação em session_state acima.
+elif st.session_state.aba_ativa_selecionada in telas_devolucoes:
+    st.markdown(f"""
+    <div class="logo-container">
+        <h1 class="logo-texto">↩️ Devoluções</h1>
+        <div class="logo-sub">{st.session_state.aba_ativa_selecionada}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if not st.session_state.devolucoes_banco_preparado:
+        st.error(
+            "⚠️ Não foi possível conectar ao banco de Devoluções (Neon). "
+            f"Detalhe: `{st.session_state.devolucoes_erro_banco}`\n\n"
+            "Configure o secret **DATABASE_URL** (Settings → Secrets do Streamlit) "
+            "apontando para o Neon PostgreSQL do módulo de Devoluções."
+        )
+    else:
+        _pagina_devolucoes = {
+            "↩️ Devoluções — Dashboard": pagina_devolucoes_dashboard,
+            "↩️ Devoluções — Recebimento": pagina_devolucoes_recebimento,
+            "↩️ Devoluções — Conferência": pagina_devolucoes_conferencia,
+            "↩️ Devoluções — Pendências": pagina_devolucoes_pendencias,
+            "↩️ Devoluções — Aguardando decisão": pagina_devolucoes_tratamento,
+            "↩️ Devoluções — Defeitos Anápolis": pagina_devolucoes_anapolis,
+            "↩️ Devoluções — Histórico": pagina_devolucoes_historico,
+            "↩️ Devoluções — Indicadores": pagina_devolucoes_indicadores,
+        }[st.session_state.aba_ativa_selecionada]
+
+        LOJAS_DEVOLUCOES = [
+            "01 - Curitiba Prime", "02 - Ponta Grossa Brands", "03 - Joinville Brands",
+            "04 - Porto Aux", "05 - Porto Praia", "06 - Campinas Cambui",
+            "07 - Caxias Porto", "08 - Campos Outlet", "09 - Brasilia Distrito",
+            "10 - Camboriú Brands", "11 - Cascavel Distrito", "12 - Prime Bigorrilho",
+            "13 - Iguaçu Distrito", "14 - Santos Outlet", "15 - Sampa Outlet",
+        ]
+
+        if _pagina_devolucoes is pagina_devolucoes_recebimento:
+            _pagina_devolucoes.render(LOJAS_DEVOLUCOES, st.session_state.devolucoes_parser)
+        else:
+            _pagina_devolucoes.render()
+
