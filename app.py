@@ -2682,6 +2682,27 @@ if st.session_state.aba_ativa_selecionada == "🏠 Visão Geral — Todos os Set
 elif st.session_state.aba_ativa_selecionada == "📊 Dashboard Estocagem":
     st.markdown("<h3 style='text-align: center; color: #ffcc00;'>📊 Painel Geral de Ocupação</h3>", unsafe_allow_html=True)
 
+    # Serviço a ser executado na Estocagem, vindo direto do relatório do SGO
+    # (Recebimento) — não é uma tarefa lançada manualmente, é o próprio SGO
+    # dizendo o que já chegou na fase "📦 Em Estocagem" e precisa ser
+    # guardado. Se o relatório for atualizado (reimportado, ou reaberto do
+    # Supabase), essa lista muda sozinha — as duas telas usam a mesma fonte.
+    df_sgo_estocagem = st.session_state.get("sgo_relatorio_df")
+    if df_sgo_estocagem is not None and not df_sgo_estocagem.empty and "Fase" in df_sgo_estocagem.columns:
+        pendente_estocagem = df_sgo_estocagem[df_sgo_estocagem["Fase"] == "📦 Em Estocagem"].copy()
+        if not pendente_estocagem.empty:
+            st.markdown("<h4 style='color: #ffcc00;'>📋 Serviço a executar (vindo do SGO)</h4>", unsafe_allow_html=True)
+            st.caption(f"{len(pendente_estocagem)} lote(s) já chegaram e estão aguardando guarda no CD.")
+            pendente_estocagem = pendente_estocagem.sort_values("DiasParado", ascending=False, na_position="last")
+            tabela_pendente = pendente_estocagem[["Lote", "Grupo", "SKU", "Descrição", "Quantidade", "DiasParado"]].rename(
+                columns={"Quantidade": "Peças", "DiasParado": "Dias parado"}
+            )
+            st.dataframe(tabela_pendente, use_container_width=True, hide_index=True, height=min(300, 44 + 35 * len(tabela_pendente)))
+            if st.button("Ver relatório completo do SGO →", key="dash_estoc_ir_sgo"):
+                st.session_state.aba_ativa_selecionada = "🚚 SGO — Próximas Entradas"
+                st.rerun()
+            st.write("---")
+
     total_casulos, pct_geral, casulos_livres, total_pecas_atuais, estatisticas_por_rua = calcular_resumo_estocagem()
 
     kcol1, kcol2, kcol3, kcol4 = st.columns(4)
