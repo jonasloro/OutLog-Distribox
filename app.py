@@ -74,6 +74,7 @@ from core.usuarios import (
     remover_usuario_no_banco,
 )
 from core.relatorios_pdf import extrair_totais_por_grupo_pdf, extrair_baixas_romaneio_pdf
+from core.tarefas import renderizar_quadro_tarefas
 
 # Módulo de devoluções (laboratório https://github.com/jonasloro/testes-
 # expedicao-devolucoes, já integrado aqui). Usa o Neon PostgreSQL, separado
@@ -2374,7 +2375,7 @@ telas_estocagem = [
     "📥 Entrada de Dados / Abastecimento",
 ]
 
-telas_administracao = []
+telas_administracao = ["📊 Dashboard Administração"]
 if st.session_state.papel_atual == "gerente":
     telas_administracao.append("🛠️ Gerenciador (Admin)")
 
@@ -2387,11 +2388,11 @@ SUBMENUS_POR_SETOR = {
 
 SETORES = [
     ("🏠 Visão Geral", telas_visao_geral),
-    ("📥 Recebimento", ["🚚 SGO — Próximas Entradas"]),
+    ("📥 Recebimento", ["📊 Dashboard Recebimento", "🚚 SGO — Próximas Entradas"]),
     ("🔎 Qualidade", telas_qualidade),
-    ("🏭 Processamento", []),
+    ("🏭 Processamento", ["📊 Dashboard Processamento"]),
     ("📦 Estocagem", telas_estocagem),
-    ("🚚 Expedição", [TELA_EXPEDICAO]),
+    ("🚚 Expedição", ["📊 Dashboard Expedição", TELA_EXPEDICAO]),
     ("🛠️ Administração", telas_administracao),
 ]
 
@@ -2401,6 +2402,16 @@ opcoes_telas += [tela for subs in SUBMENUS_POR_SETOR.values() for _, telas in su
 
 if st.session_state.aba_ativa_selecionada not in opcoes_telas:
     st.session_state.aba_ativa_selecionada = "🏠 Visão Geral — Todos os Setores"
+
+
+def _usuarios_disponiveis_para_tarefas():
+    """Lista de nomes de usuário pro seletor de responsável do quadro de
+    tarefas. Reaproveita o cadastro de usuários já existente (Supabase)."""
+    try:
+        usuarios = carregar_usuarios_do_banco()
+    except Exception:
+        usuarios = None
+    return sorted(usuarios.keys()) if usuarios else []
 
 
 if "primeira_carga_feita" not in st.session_state:
@@ -2726,6 +2737,40 @@ elif st.session_state.aba_ativa_selecionada == "📊 Dashboard Estocagem":
             st.markdown(f"<div class='card-dashboard'><h5>🔥 Corredor Mais Cheio</h5><h2>{rua_mais_cheia['Rua']}</h2><p style='color:#8892b0; margin-top:4px; font-size:12px;'>{rua_mais_cheia['Ocupação (%)']:.1f}% ocupado</p></div>", unsafe_allow_html=True)
         with kcol_rank2:
             st.markdown(f"<div class='card-dashboard'><h5>🌤️ Corredor Mais Livre</h5><h2>{rua_mais_vazia['Rua']}</h2><p style='color:#8892b0; margin-top:4px; font-size:12px;'>{rua_mais_vazia['Ocupação (%)']:.1f}% ocupado</p></div>", unsafe_allow_html=True)
+
+    st.write("---")
+    renderizar_quadro_tarefas("Estocagem", _usuarios_disponiveis_para_tarefas())
+
+
+# ==========================================
+# NOVOS DASHBOARDS — um por setor que ainda não tinha nenhuma tela própria
+# (Recebimento, Processamento, Expedição, Administração). Cada um traz o
+# quadro de tarefas daquele setor; Recebimento e Expedição também trazem
+# um resumo rápido do que já existe no setor (SGO / Expedição Teste).
+# ==========================================
+elif st.session_state.aba_ativa_selecionada == "📊 Dashboard Recebimento":
+    st.markdown("<h3 style='text-align: center; color: #ffcc00;'>📊 Dashboard — Recebimento</h3>", unsafe_allow_html=True)
+    st.caption("Acompanhamento das entradas chegando no CD (SGO) e tarefas do setor.")
+    st.write("---")
+    renderizar_quadro_tarefas("Recebimento", _usuarios_disponiveis_para_tarefas())
+
+elif st.session_state.aba_ativa_selecionada == "📊 Dashboard Processamento":
+    st.markdown("<h3 style='text-align: center; color: #ffcc00;'>📊 Dashboard — Processamento</h3>", unsafe_allow_html=True)
+    st.caption("Setor ainda sem telas de processo próprias — por enquanto, só o quadro de tarefas.")
+    st.write("---")
+    renderizar_quadro_tarefas("Processamento", _usuarios_disponiveis_para_tarefas())
+
+elif st.session_state.aba_ativa_selecionada == "📊 Dashboard Expedição":
+    st.markdown("<h3 style='text-align: center; color: #ffcc00;'>📊 Dashboard — Expedição</h3>", unsafe_allow_html=True)
+    st.caption("Separação/expedição (modo teste) e o módulo de Devoluções ficam no submenu ao lado. Aqui: tarefas gerais do setor.")
+    st.write("---")
+    renderizar_quadro_tarefas("Expedição", _usuarios_disponiveis_para_tarefas())
+
+elif st.session_state.aba_ativa_selecionada == "📊 Dashboard Administração":
+    st.markdown("<h3 style='text-align: center; color: #ffcc00;'>📊 Dashboard — Administração</h3>", unsafe_allow_html=True)
+    st.caption("Tarefas administrativas do app (cadastros, ajustes de estrutura/capacidade, etc.)")
+    st.write("---")
+    renderizar_quadro_tarefas("Administração", _usuarios_disponiveis_para_tarefas())
 
 
 # ==========================================
@@ -3998,6 +4043,9 @@ elif st.session_state.aba_ativa_selecionada == "🚚 SGO — Próximas Entradas"
         botao_exportar_excel(tabela, "sgo_completo.xlsx", key="export_sgo_completo")
     st.caption(f"Fonte: {st.session_state.get('sgo_relatorio_nome','SGO')} · {len(df_sgo):,} registros")
 
+    st.write("---")
+    renderizar_quadro_tarefas("Recebimento", _usuarios_disponiveis_para_tarefas())
+
 elif st.session_state.aba_ativa_selecionada == "🛠️ Gerenciador (Admin)":
     if st.session_state.papel_atual != "gerente":
         st.error("⛔ Acesso restrito a usuários com papel de Gerente.")
@@ -4229,6 +4277,10 @@ elif st.session_state.aba_ativa_selecionada in telas_devolucoes:
         else:
             _pagina_devolucoes.render()
 
+        if st.session_state.aba_ativa_selecionada == "🏠 Devoluções — Dashboard":
+            st.write("---")
+            renderizar_quadro_tarefas("Devoluções", _usuarios_disponiveis_para_tarefas())
+
 # Setor Qualidade — indicadores de defeito (avaria). Lê da mesma tabela que
 # a tratativa de Devoluções grava (devolucao_tratamentos, destino=AVARIA),
 # então qualquer avaria lançada em Expedição aparece aqui sozinha.
@@ -4248,5 +4300,7 @@ elif st.session_state.aba_ativa_selecionada in telas_qualidade:
         )
     else:
         pagina_devolucoes_qualidade.render()
+        st.write("---")
+        renderizar_quadro_tarefas("Qualidade", _usuarios_disponiveis_para_tarefas())
 
 
