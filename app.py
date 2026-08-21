@@ -76,6 +76,12 @@ from core.usuarios import (
 )
 from core.relatorios_pdf import extrair_totais_por_grupo_pdf, extrair_baixas_romaneio_pdf
 from core.tarefas import renderizar_quadro_tarefas
+from core.mapa_grupo_tipo import (
+    TIPOS_CASULO,
+    carregar_mapa_grupo_tipo,
+    remover_mapeamento_grupo,
+    salvar_mapeamento_grupo,
+)
 
 # Módulo de devoluções (laboratório https://github.com/jonasloro/testes-
 # expedicao-devolucoes, já integrado aqui). Usa o Neon PostgreSQL, separado
@@ -2629,6 +2635,59 @@ def formatar_hora_brasilia(timestamp, fmt="%d/%m/%Y %H:%M"):
         ts = ts.tz_localize("UTC")
     return ts.tz_convert(FUSO_BRASILIA).strftime(fmt)
 
+def _capacidade_minima_do_tipo(tipo_estrutural):
+    """Menor densidade fixa cadastrada pra esse tipo, em qualquer rua —
+    critério conservador (mesmo já usado no resto do motor), pra estimar
+    'quantos casulos' sem depender de já saber em qual rua específica a
+    mercadoria vai parar. Cai no genérico (20) se nada estiver cadastrado
+    ainda pra esse tipo em nenhuma rua."""
+    valores = []
+    for tipos_da_rua in CAPACIDADE_FIXA_POR_RUA.values():
+        valor = tipos_da_rua.get(tipo_estrutural)
+        if isinstance(valor, dict):
+            valores.extend(v for v in valor.values() if v)
+        elif valor:
+            valores.append(valor)
+    return min(valores) if valores else 20
+
+def calcular_casulos_necessarios_sgo(fase="🚚 Em Trânsito"):
+    """Cruza o relatório do SGO (filtrado por fase) com o mapa Grupo→tipo
+    de casulo e a densidade fixa por tipo, pra estimar quantos casulos de
+    cada tipo a mercadoria daquela fase vai precisar quando chegar — e que
+    % isso representa do total de casulos já cadastrados no CD.
+    Retorna (df_por_tipo, grupos_sem_mapeamento, total_casulos_necessarios,
+    pct_do_estoque) ou None se não houver relatório carregado."""
+    df_sgo = st.session_state.get("sgo_relatorio_df")
+    if df_sgo is None or df_sgo.empty or "Fase" not in df_sgo.columns:
+        return None
+
+    mapa = st.session_state.get("mapa_grupo_tipo_casulo")
+    if mapa is None:
+        mapa = carregar_mapa_grupo_tipo() or {}
+        st.session_state.mapa_grupo_tipo_casulo = mapa
+
+    pendente = df_sgo[df_sgo["Fase"] == fase].copy()
+    if pendente.empty:
+        return pd.DataFrame(), [], 0, 0.0
+
+    pendente["tipo_estrutural"] = pendente["Grupo"].map(mapa)
+    grupos_sem_mapeamento = sorted(pendente[pendente["tipo_estrutural"].isna()]["Grupo"].unique().tolist())
+
+    mapeados = pendente.dropna(subset=["tipo_estrutural"])
+    if mapeados.empty:
+        return pd.DataFrame(), grupos_sem_mapeamento, 0, 0.0
+
+    resumo = mapeados.groupby("tipo_estrutural")["Quantidade"].sum().reset_index()
+    resumo["Capacidade por casulo"] = resumo["tipo_estrutural"].apply(_capacidade_minima_do_tipo)
+    resumo["Casulos necessários"] = (resumo["Quantidade"] / resumo["Capacidade por casulo"]).apply(math.ceil)
+    resumo = resumo.rename(columns={"tipo_estrutural": "Tipo de casulo", "Quantidade": "Peças"})
+
+    total_necessarios = int(resumo["Casulos necessários"].sum())
+    total_casulos_cd, _, _, _, _ = calcular_resumo_estocagem()
+    pct_do_estoque = (total_necessarios / total_casulos_cd * 100) if total_casulos_cd else 0.0
+
+    return resumo, grupos_sem_mapeamento, total_necessarios, pct_do_estoque
+
 def renderizar_servico_sgo(fase, chave_botao, titulo=None):
     """Mostra os lotes do relatório do SGO que estão numa fase específica,
     como 'serviço a executar' daquele setor — puxado direto do relatório
@@ -2821,6 +2880,29 @@ elif st.session_state.aba_ativa_selecionada == "📊 Dashboard Estocagem":
 elif st.session_state.aba_ativa_selecionada == "📊 Dashboard Recebimento":
     st.markdown("<h3 style='text-align: center; color: #ffcc00;'>📊 Dashboard — Recebimento</h3>", unsafe_allow_html=True)
     renderizar_servico_sgo("🚚 Em Trânsito", "dash_receb", "Serviço a executar — mercadoria a caminho do CD")
+
+    # Indicador de casulos necessários: cruza o que está em trânsito com o
+    # tipo de casulo (via mapa Grupo→tipo, cadastrado no Gerenciador) e a
+    # densidade fixa já configurada. Se algum Grupo ainda não foi mapeado,
+    # avisa quais, sem travar o resto do indicador.
+    resultado_necessarios = calcular_casulos_necessarios_sgo("🚚 Em Trânsito")
+    if resultado_necessarios is not None:
+        df_necessarios, grupos_sem_mapa, total_necessarios, pct_estoque = resultado_necessarios
+        if not df_necessarios.empty or grupos_sem_mapa:
+            st.markdown("<h4 style='color: #ffcc00;'>📦 Casulos necessários pra essa mercadoria chegar</h4>", unsafe_allow_html=True)
+            if not df_necessarios.empty:
+                c1, c2 = st.columns(2)
+                c1.metric("Casulos necessários (estimativa)", total_necessarios)
+                c2.metric("% do estoque atual de casulos", f"{pct_estoque:.1f}%")
+                st.dataframe(df_necessarios, use_container_width=True, hide_index=True)
+            if grupos_sem_mapa:
+                st.warning(
+                    f"⚠️ {len(grupos_sem_mapa)} grupo(s) do relatório ainda não têm tipo de casulo definido, "
+                    f"não entraram na conta: {', '.join(grupos_sem_mapa)}. "
+                    "Defina em Administração → Gerenciador → aba 'Mapa Grupo → Casulo'."
+                )
+            st.write("---")
+
     renderizar_quadro_tarefas("Recebimento", _usuarios_disponiveis_para_tarefas())
 
 elif st.session_state.aba_ativa_selecionada == "📊 Dashboard Processamento":
@@ -4176,9 +4258,10 @@ elif st.session_state.aba_ativa_selecionada == "🛠️ Gerenciador (Admin)":
         st.markdown("<h3 style='text-align: center; color: #ffcc00;'>🛠️ Painel do Gerenciador</h3>", unsafe_allow_html=True)
         st.markdown("<p style='text-align: center; color: #8892b0;'>Funções críticas disponíveis apenas para o papel de Gerente.</p>", unsafe_allow_html=True)
 
-        tab_ger1, tab_ger2, tab_ger3, tab_ger4, tab_cfg1, tab_cfg2, tab_cfg3 = st.tabs([
+        tab_ger1, tab_ger2, tab_ger3, tab_ger4, tab_cfg1, tab_cfg2, tab_cfg3, tab_mapa = st.tabs([
             "👥 Gestão de Logins", "🧾 Usuários Cadastrados", "📜 Histórico de Movimentações",
-            "🧹 Ações Globais", "🏗️ Estrutura do CD", "📦 Capacidades", "📏 Densidades Fixas"
+            "🧹 Ações Globais", "🏗️ Estrutura do CD", "📦 Capacidades", "📏 Densidades Fixas",
+            "🔗 Mapa Grupo → Casulo"
         ])
 
         with tab_ger1:
@@ -4357,6 +4440,52 @@ elif st.session_state.aba_ativa_selecionada == "🛠️ Gerenciador (Admin)":
                         st.session_state.configuracoes_cd_carregadas=True; st.success("Densidades fixas salvas e recarregadas com sucesso."); st.rerun()
                     else:
                         st.error(f"❌ Não foi possível salvar as densidades fixas. `{st.session_state.get('ultimo_erro_bd')}`")
+
+        with tab_mapa:
+            st.markdown("#### 🔗 Mapa Grupo (SGO) → Tipo de Casulo")
+            st.caption(
+                "O 'Grupo' do relatório do SGO não bate automaticamente com "
+                "os tipos de casulo — associe cada um manualmente aqui. Isso "
+                "alimenta o indicador 'Casulos necessários' no Dashboard de "
+                "Recebimento."
+            )
+            mapa_atual = carregar_mapa_grupo_tipo()
+            if mapa_atual is None:
+                st.error(f"⚠️ Não consegui carregar o mapa. `{st.session_state.get('ultimo_erro_bd')}`")
+            else:
+                df_sgo_mapa = st.session_state.get("sgo_relatorio_df")
+                grupos_do_relatorio = sorted(df_sgo_mapa["Grupo"].dropna().unique().tolist()) if df_sgo_mapa is not None and "Grupo" in df_sgo_mapa.columns else []
+                grupos_sem_mapa_admin = [g for g in grupos_do_relatorio if g not in mapa_atual]
+
+                if grupos_sem_mapa_admin:
+                    st.warning(f"⚠️ {len(grupos_sem_mapa_admin)} grupo(s) do relatório atual ainda sem tipo definido.")
+                    with st.form(key="form_mapear_grupos_pendentes"):
+                        escolhas_pendentes = {}
+                        for g in grupos_sem_mapa_admin:
+                            escolhas_pendentes[g] = st.selectbox(g, TIPOS_CASULO, key=f"map_pendente_{g}")
+                        if st.form_submit_button("💾 Salvar mapeamentos pendentes", type="primary"):
+                            falhas = [g for g, tipo in escolhas_pendentes.items() if not salvar_mapeamento_grupo(g, tipo)]
+                            if falhas:
+                                st.error(f"❌ Não consegui salvar: {', '.join(falhas)}. `{st.session_state.get('ultimo_erro_bd')}`")
+                            else:
+                                st.session_state.mapa_grupo_tipo_casulo = None
+                                st.success("Mapeamentos salvos.")
+                                st.rerun()
+                elif not grupos_do_relatorio:
+                    st.info("Nenhum relatório do SGO carregado ainda — importe um em Recebimento pra ver os grupos que precisam de mapeamento.")
+
+                st.markdown("##### Mapeamentos já cadastrados")
+                if not mapa_atual:
+                    st.caption("Nenhum ainda.")
+                else:
+                    for grupo, tipo in sorted(mapa_atual.items()):
+                        col_g1, col_g2, col_g3 = st.columns([3, 2, 1])
+                        col_g1.write(grupo)
+                        col_g2.write(tipo)
+                        if col_g3.button("🗑️", key=f"remover_map_{grupo}"):
+                            if remover_mapeamento_grupo(grupo):
+                                st.session_state.mapa_grupo_tipo_casulo = None
+                                st.rerun()
 
 # ==========================================
 # MÓDULO DE DEVOLUÇÕES
