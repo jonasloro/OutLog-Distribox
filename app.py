@@ -2361,7 +2361,9 @@ telas_visao_geral = [
 # Expedição de verdade em vez de botão escondido, e Processamento fica
 # como setor vazio pronto pra receber telas futuras. "Visão Geral" é o
 # setor novo que junta um resumo de todo mundo — e é onde o app abre por
-# padrão agora, em vez de cair direto no Dashboard Estocagem.
+# padrão agora, em vez de cair direto no Dashboard Estocagem. Gerenciador
+# saiu de dentro de Estocagem e ganhou setor próprio ("Administração"),
+# junto de outras telas administrativas futuras.
 telas_estocagem = [
     "📊 Dashboard Estocagem",
     "📦 Visualizador de Casulos",
@@ -2371,8 +2373,17 @@ telas_estocagem = [
     "📄 Importar Relatório de Estoque",
     "📥 Entrada de Dados / Abastecimento",
 ]
+
+telas_administracao = []
 if st.session_state.papel_atual == "gerente":
-    telas_estocagem.append("🛠️ Gerenciador (Admin)")
+    telas_administracao.append("🛠️ Gerenciador (Admin)")
+
+# Dentro do setor Expedição, "Devolução" é um submenu (expander aninhado)
+# em vez de telas soltas junto de Expedição (Teste) — ver renderização da
+# sidebar logo abaixo, onde SUBMENUS_POR_SETOR é consultado.
+SUBMENUS_POR_SETOR = {
+    "🚚 Expedição": [("↩️ Devolução", telas_devolucoes)],
+}
 
 SETORES = [
     ("🏠 Visão Geral", telas_visao_geral),
@@ -2380,11 +2391,13 @@ SETORES = [
     ("🔎 Qualidade", telas_qualidade),
     ("🏭 Processamento", []),
     ("📦 Estocagem", telas_estocagem),
-    ("🚚 Expedição", [TELA_EXPEDICAO] + telas_devolucoes),
+    ("🚚 Expedição", [TELA_EXPEDICAO]),
+    ("🛠️ Administração", telas_administracao),
 ]
 
 
 opcoes_telas = [tela for _, telas in SETORES for tela in telas]
+opcoes_telas += [tela for subs in SUBMENUS_POR_SETOR.values() for _, telas in subs for tela in telas]
 
 if st.session_state.aba_ativa_selecionada not in opcoes_telas:
     st.session_state.aba_ativa_selecionada = "🏠 Visão Geral — Todos os Setores"
@@ -2396,12 +2409,15 @@ if "sidebar_deve_colapsar" not in st.session_state:
     st.session_state.sidebar_deve_colapsar = False
 
 for setor_nome, telas_do_setor in SETORES:
-    if not telas_do_setor:
+    submenus_do_setor = SUBMENUS_POR_SETOR.get(setor_nome, [])
+
+    if not telas_do_setor and not submenus_do_setor:
         with st.sidebar.expander(setor_nome, expanded=False):
             st.caption("Em breve.")
         continue
 
-    setor_contem_tela_ativa = st.session_state.aba_ativa_selecionada in telas_do_setor
+    todas_telas_do_setor = telas_do_setor + [t for _, telas in submenus_do_setor for t in telas]
+    setor_contem_tela_ativa = st.session_state.aba_ativa_selecionada in todas_telas_do_setor
     with st.sidebar.expander(setor_nome, expanded=setor_contem_tela_ativa):
         for tela in telas_do_setor:
             # Botão (e não radio): um radio só dispara on_change quando o
@@ -2415,6 +2431,22 @@ for setor_nome, telas_do_setor in SETORES:
                 st.session_state.aba_ativa_selecionada = tela
                 st.session_state.sidebar_deve_colapsar = True
                 st.rerun()
+
+        # Submenus: um expander aninhado por grupo (ex: "↩️ Devolução"
+        # dentro de "🚚 Expedição"), com as telas daquele grupo dentro.
+        for nome_submenu, telas_submenu in submenus_do_setor:
+            submenu_contem_tela_ativa = st.session_state.aba_ativa_selecionada in telas_submenu
+            with st.expander(nome_submenu, expanded=submenu_contem_tela_ativa):
+                for tela in telas_submenu:
+                    e_tela_atual = (tela == st.session_state.aba_ativa_selecionada)
+                    if st.button(
+                        tela, key=f"nav_{setor_nome}_{nome_submenu}_{tela}",
+                        use_container_width=True,
+                        type="primary" if e_tela_atual else "secondary",
+                    ):
+                        st.session_state.aba_ativa_selecionada = tela
+                        st.session_state.sidebar_deve_colapsar = True
+                        st.rerun()
 
 # Colapsa a sidebar automaticamente depois que o usuário navega pra
 # qualquer tela — mas só a partir da SEGUNDA renderização em diante, pra
