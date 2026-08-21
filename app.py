@@ -950,6 +950,27 @@ def salvar_snapshot_id_brasil(itens):
         st.session_state.ultimo_erro_id_brasil = f"falha ao salvar snapshot no Supabase: {e}"
         return False
 
+def obter_ultima_sincronizacao_id_brasil():
+    """Timestamp da sincronização mais recente já salva em estoque_id_brasil
+    (todas as linhas de um mesmo snapshot têm o mesmo instante, gravado com
+    now() no INSERT — então MAX() já é a hora da última vez que alguém
+    clicou em 'Sincronizar agora')."""
+    conn = obter_conexao_bd()
+    if conn is None:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT MAX(sincronizado_em) FROM estoque_id_brasil")
+            resultado = cur.fetchone()
+        conn.close()
+        return resultado[0] if resultado else None
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return None
+
 def carregar_snapshot_id_brasil_do_banco():
     """Carrega o snapshot mais recente salvo em estoque_id_brasil, no formato
     {chave_casulo: quantidade_itens} — só as linhas que resolveram uma chave
@@ -2248,12 +2269,12 @@ def carregar_ultimo_relatorio_sgo_supabase():
     """Carrega o último relatório SGO persistido no Supabase."""
     conn = obter_conexao_bd()
     if conn is None:
-        return None, None
+        return None, None, None
 
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT id, nome_arquivo
+                """SELECT id, nome_arquivo, importado_em
                    FROM public.sgo_relatorios
                    ORDER BY importado_em DESC, id DESC
                    LIMIT 1"""
@@ -2261,9 +2282,9 @@ def carregar_ultimo_relatorio_sgo_supabase():
             meta = cur.fetchone()
             if not meta:
                 conn.close()
-                return None, None
+                return None, None, None
 
-            relatorio_id, nome_arquivo = meta
+            relatorio_id, nome_arquivo, importado_em = meta
             try:
                 cur.execute(
                     """SELECT lote, grupo, sku, descricao, fornecedor, quantidade,
@@ -2305,14 +2326,14 @@ def carregar_ultimo_relatorio_sgo_supabase():
         df["DataChegada"] = pd.to_datetime(df["DataChegada"], errors="coerce")
         for c in ["Lote", "Grupo", "SKU", "Descrição", "Fornecedor", "StatusOriginal", "Fase", "Origem"]:
             df[c] = df[c].fillna("").astype(str)
-        return _enriquecer_sgo(df), nome_arquivo
+        return _enriquecer_sgo(df), nome_arquivo, importado_em
     except Exception as e:
         try:
             conn.close()
         except Exception:
             pass
         st.session_state.ultimo_erro_bd = str(e)
-        return None, None
+        return None, None, None
 
 def _sgo_card(titulo, valor, subtitulo="", cor="#ffcc00"):
     st.markdown(f"""<div style="background:#11161d;border:1px solid #283845;border-radius:12px;padding:14px 16px;min-height:100px;">
@@ -2812,6 +2833,11 @@ elif st.session_state.aba_ativa_selecionada == "📦 Visualizador de Casulos":
             "recente — o snapshot anterior é descartado. Os números dos "
             "casulos abaixo já usam esse dado real quando disponível."
         )
+        _ultima_sync = obter_ultima_sincronizacao_id_brasil()
+        if _ultima_sync:
+            st.caption(f"🕐 Última sincronização: {pd.Timestamp(_ultima_sync).strftime('%d/%m/%Y %H:%M')}")
+        else:
+            st.caption("🕐 Ainda não foi sincronizado nenhuma vez.")
         if st.button("🔄 Sincronizar agora", key="btn_sync_id_brasil"):
             with st.spinner("Consultando todas as páginas da API ID Brasil e salvando no Supabase..."):
                 resumo = sincronizar_snapshot_completo_id_brasil()
@@ -3921,16 +3947,19 @@ elif st.session_state.aba_ativa_selecionada == "🚚 SGO — Próximas Entradas"
         try:
             df_sgo_novo = carregar_relatorio_sgo(arquivo_sgo)
             salvou, erro_bd = salvar_relatorio_sgo_supabase(df_sgo_novo, arquivo_sgo.name)
+            agora_sgo = datetime.now()
 
             if salvou:
                 st.session_state.sgo_relatorio_df = df_sgo_novo
                 st.session_state.sgo_relatorio_nome = arquivo_sgo.name
+                st.session_state.sgo_relatorio_atualizado_em = agora_sgo
                 st.success("✅ Relatório do SGO salvo no Supabase. Ele continuará disponível mesmo após reiniciar o app.")
             else:
                 # Mantém a importação funcional nesta sessão, sem perder o relatório
                 # apenas porque o banco não está acessível.
                 st.session_state.sgo_relatorio_df = df_sgo_novo
                 st.session_state.sgo_relatorio_nome = arquivo_sgo.name
+                st.session_state.sgo_relatorio_atualizado_em = agora_sgo
                 st.warning(f"⚠️ Relatório carregado nesta sessão, mas não foi salvo no Supabase: {erro_bd}")
         except Exception as e:
             st.error(f"⚠️ Não consegui processar o relatório: {e}")
@@ -3938,10 +3967,11 @@ elif st.session_state.aba_ativa_selecionada == "🚚 SGO — Próximas Entradas"
 
     df_sgo = st.session_state.get("sgo_relatorio_df")
     if df_sgo is None:
-        df_sgo, nome_sgo = carregar_ultimo_relatorio_sgo_supabase()
+        df_sgo, nome_sgo, importado_em_sgo = carregar_ultimo_relatorio_sgo_supabase()
         if df_sgo is not None:
             st.session_state.sgo_relatorio_df = df_sgo
             st.session_state.sgo_relatorio_nome = nome_sgo
+            st.session_state.sgo_relatorio_atualizado_em = importado_em_sgo
 
     if df_sgo is None:
         st.info("📄 Envie o relatório do SGO para começar.\n\nSe já existir uma importação salva, o OutLog carregará automaticamente o último relatório do Supabase.")
@@ -4068,7 +4098,9 @@ elif st.session_state.aba_ativa_selecionada == "🚚 SGO — Próximas Entradas"
         tabela=tabela.rename(columns={"Quantidade":"Peças","Fase":"Etapa","Data":"Previsto","DiasParado":"Dias parado"})
         st.dataframe(tabela,use_container_width=True,hide_index=True,height=500)
         botao_exportar_excel(tabela, "sgo_completo.xlsx", key="export_sgo_completo")
-    st.caption(f"Fonte: {st.session_state.get('sgo_relatorio_nome','SGO')} · {len(df_sgo):,} registros")
+    _atualizado_em_sgo = st.session_state.get("sgo_relatorio_atualizado_em")
+    _atualizado_txt_sgo = pd.Timestamp(_atualizado_em_sgo).strftime("%d/%m/%Y %H:%M") if _atualizado_em_sgo else "—"
+    st.caption(f"Fonte: {st.session_state.get('sgo_relatorio_nome','SGO')} · {len(df_sgo):,} registros · última atualização: {_atualizado_txt_sgo}")
 
     st.write("---")
     renderizar_quadro_tarefas("Recebimento", _usuarios_disponiveis_para_tarefas())
