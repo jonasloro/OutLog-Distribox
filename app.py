@@ -2872,17 +2872,8 @@ elif st.session_state.aba_ativa_selecionada == "📦 Visualizador de Casulos":
         _sync_recente = _horas_desde_sync is not None and _horas_desde_sync < 6
         _confirma_sync_recente = True
         if _sync_recente:
-            st.markdown(
-                "<div style='background:#2b1a1a; border:1px solid #e74c3c; border-radius:10px; "
-                "padding:12px 16px; margin:10px 0; display:flex; align-items:center; gap:10px;'>"
-                "<span style='font-size:22px;'>✋</span>"
-                "<span style='color:#f5c6c6; font-size:13px;'>"
-                "<b style='color:#e74c3c;'>Precisa sincronizar agora mesmo?</b> "
-                f"A última sincronização foi há {_horas_desde_sync:.1f}h — sincronizar de novo "
-                "com menos de 6h não é aconselhável, a API não é brincadeira."
-                "</span></div>",
-                unsafe_allow_html=True,
-            )
+            st.image("assets/avisos/aviso_sync_menos_6h.png", use_container_width=True)
+            st.caption(f"A última sincronização foi há {_horas_desde_sync:.1f}h.")
             _confirma_sync_recente = st.checkbox(
                 "Sei que sincronizei há menos de 6h e quero sincronizar mesmo assim",
                 key="confirma_sync_recente",
@@ -3992,16 +3983,7 @@ elif st.session_state.aba_ativa_selecionada == "🚚 SGO — Próximas Entradas"
     st.markdown("<h3 style='text-align:center;color:#ffcc00;'>🚚 SGO — Próximas Entradas</h3>", unsafe_allow_html=True)
     st.markdown("<p style='text-align:center;color:#8892b0;'>Veja primeiro o que importa: quanto vem, quando chega e em que etapa está.</p>", unsafe_allow_html=True)
 
-    st.markdown(
-        "<div style='background:#1f2833; border:1px solid #45a29e; border-radius:10px; "
-        "padding:12px 16px; margin-bottom:14px; display:flex; align-items:center; gap:10px;'>"
-        "<span style='font-size:22px;'>✅</span>"
-        "<span style='color:#c5c6c7; font-size:13px;'>"
-        "<b style='color:#45a29e;'>Pode atualizar sem medo:</b> sempre que você sobe um arquivo novo, "
-        "a versão anterior do relatório do SGO é descartada automaticamente — não acumula relatório velho."
-        "</span></div>",
-        unsafe_allow_html=True,
-    )
+    st.image("assets/avisos/aviso_sgo_atualizado.png", use_container_width=True)
     arquivo_sgo = st.file_uploader("📄 Relatório do SGO (.xlsx)", type=["xlsx"], key="upload_sgo_lotes")
     if arquivo_sgo is not None:
         try:
