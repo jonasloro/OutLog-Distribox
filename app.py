@@ -3965,6 +3965,11 @@ elif st.session_state.aba_ativa_selecionada == "🚚 SGO — Próximas Entradas"
             st.error(f"⚠️ Não consegui processar o relatório: {e}")
             st.stop()
 
+    # Resolve o relatório (session_state ou fallback pro último salvo no
+    # Supabase) ANTES de desenhar o badge de "última atualização" logo
+    # abaixo — senão, no primeiro carregamento da tela (antes de qualquer
+    # upload nesta sessão), o badge mostraria "nenhum relatório" mesmo já
+    # existindo um salvo, até a próxima interação.
     df_sgo = st.session_state.get("sgo_relatorio_df")
     if df_sgo is None:
         df_sgo, nome_sgo, importado_em_sgo = carregar_ultimo_relatorio_sgo_supabase()
@@ -3972,6 +3977,25 @@ elif st.session_state.aba_ativa_selecionada == "🚚 SGO — Próximas Entradas"
             st.session_state.sgo_relatorio_df = df_sgo
             st.session_state.sgo_relatorio_nome = nome_sgo
             st.session_state.sgo_relatorio_atualizado_em = importado_em_sgo
+
+    _atualizado_em_sgo_topo = st.session_state.get("sgo_relatorio_atualizado_em")
+    if _atualizado_em_sgo_topo:
+        _txt_topo_sgo = pd.Timestamp(_atualizado_em_sgo_topo).strftime("%d/%m/%Y às %H:%M")
+        st.markdown(
+            f"<div style='text-align:center; margin: 4px 0 18px 0;'>"
+            f"<span style='background:#1f2833; border:1px solid #ffcc00; color:#ffcc00; "
+            f"border-radius:20px; padding:6px 16px; font-size:13px; font-weight:600;'>"
+            f"🕐 Última atualização: {_txt_topo_sgo}</span></div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            "<div style='text-align:center; margin: 4px 0 18px 0;'>"
+            "<span style='background:#1f2833; border:1px solid #8892b0; color:#8892b0; "
+            "border-radius:20px; padding:6px 16px; font-size:13px; font-weight:600;'>"
+            "🕐 Nenhum relatório importado ainda</span></div>",
+            unsafe_allow_html=True,
+        )
 
     if df_sgo is None:
         st.info("📄 Envie o relatório do SGO para começar.\n\nSe já existir uma importação salva, o OutLog carregará automaticamente o último relatório do Supabase.")
@@ -4098,9 +4122,7 @@ elif st.session_state.aba_ativa_selecionada == "🚚 SGO — Próximas Entradas"
         tabela=tabela.rename(columns={"Quantidade":"Peças","Fase":"Etapa","Data":"Previsto","DiasParado":"Dias parado"})
         st.dataframe(tabela,use_container_width=True,hide_index=True,height=500)
         botao_exportar_excel(tabela, "sgo_completo.xlsx", key="export_sgo_completo")
-    _atualizado_em_sgo = st.session_state.get("sgo_relatorio_atualizado_em")
-    _atualizado_txt_sgo = pd.Timestamp(_atualizado_em_sgo).strftime("%d/%m/%Y %H:%M") if _atualizado_em_sgo else "—"
-    st.caption(f"Fonte: {st.session_state.get('sgo_relatorio_nome','SGO')} · {len(df_sgo):,} registros · última atualização: {_atualizado_txt_sgo}")
+    st.caption(f"Fonte: {st.session_state.get('sgo_relatorio_nome','SGO')} · {len(df_sgo):,} registros")
 
     st.write("---")
     renderizar_quadro_tarefas("Recebimento", _usuarios_disponiveis_para_tarefas())
