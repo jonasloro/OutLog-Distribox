@@ -15,6 +15,7 @@ import xml.etree.ElementTree as ET
 from io import BytesIO
 from PIL import Image
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 try:
     import requests
@@ -2609,6 +2610,25 @@ def calcular_estatisticas_rua(rua_nome):
                 livres += 1
     return soma_fracoes, contagem, soma_pecas, livres
 
+FUSO_BRASILIA = ZoneInfo("America/Sao_Paulo")
+
+def agora_brasilia():
+    """Hora atual em Brasília. O servidor do Streamlit Cloud roda em UTC —
+    nunca usar datetime.now() puro pra hora que o usuário vai ver, senão
+    o relógio mostrado fica ~3h adiantado em relação ao horário real do
+    Brasil."""
+    return datetime.now(FUSO_BRASILIA)
+
+def formatar_hora_brasilia(timestamp, fmt="%d/%m/%Y %H:%M"):
+    """Formata um timestamp (naive = assumido UTC, já que é o que o
+    servidor grava; ou timezone-aware) no horário de Brasília."""
+    if timestamp is None:
+        return None
+    ts = pd.Timestamp(timestamp)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    return ts.tz_convert(FUSO_BRASILIA).strftime(fmt)
+
 def renderizar_servico_sgo(fase, chave_botao, titulo=None):
     """Mostra os lotes do relatório do SGO que estão numa fase específica,
     como 'serviço a executar' daquele setor — puxado direto do relatório
@@ -2834,11 +2854,41 @@ elif st.session_state.aba_ativa_selecionada == "📦 Visualizador de Casulos":
             "casulos abaixo já usam esse dado real quando disponível."
         )
         _ultima_sync = obter_ultima_sincronizacao_id_brasil()
+        _horas_desde_sync = None
         if _ultima_sync:
-            st.caption(f"🕐 Última sincronização: {pd.Timestamp(_ultima_sync).strftime('%d/%m/%Y %H:%M')}")
+            _ts_sync = pd.Timestamp(_ultima_sync)
+            if _ts_sync.tzinfo is None:
+                _ts_sync = _ts_sync.tz_localize("UTC")
+            _horas_desde_sync = (pd.Timestamp.now(tz="UTC") - _ts_sync).total_seconds() / 3600
+            st.caption(f"🕐 Última sincronização: {formatar_hora_brasilia(_ultima_sync)}")
         else:
             st.caption("🕐 Ainda não foi sincronizado nenhuma vez.")
-        if st.button("🔄 Sincronizar agora", key="btn_sync_id_brasil"):
+
+        # Aviso condicional: só aparece quando o risco é real (sync recente
+        # de menos de 6h) — sincronizar toda hora sem necessidade não tem
+        # vantagem nenhuma (é sempre a mesma leitura via GET) e só gasta
+        # tempo/limite da API. Trava o botão até o usuário confirmar que
+        # está ciente.
+        _sync_recente = _horas_desde_sync is not None and _horas_desde_sync < 6
+        _confirma_sync_recente = True
+        if _sync_recente:
+            st.markdown(
+                "<div style='background:#2b1a1a; border:1px solid #e74c3c; border-radius:10px; "
+                "padding:12px 16px; margin:10px 0; display:flex; align-items:center; gap:10px;'>"
+                "<span style='font-size:22px;'>✋</span>"
+                "<span style='color:#f5c6c6; font-size:13px;'>"
+                "<b style='color:#e74c3c;'>Precisa sincronizar agora mesmo?</b> "
+                f"A última sincronização foi há {_horas_desde_sync:.1f}h — sincronizar de novo "
+                "com menos de 6h não é aconselhável, a API não é brincadeira."
+                "</span></div>",
+                unsafe_allow_html=True,
+            )
+            _confirma_sync_recente = st.checkbox(
+                "Sei que sincronizei há menos de 6h e quero sincronizar mesmo assim",
+                key="confirma_sync_recente",
+            )
+
+        if st.button("🔄 Sincronizar agora", key="btn_sync_id_brasil", disabled=_sync_recente and not _confirma_sync_recente):
             with st.spinner("Consultando todas as páginas da API ID Brasil e salvando no Supabase..."):
                 resumo = sincronizar_snapshot_completo_id_brasil()
 
@@ -3687,7 +3737,7 @@ elif st.session_state.aba_ativa_selecionada == "📄 Importar Relatório de Esto
                                 st.session_state.relatorio_estoque_grupos = grupos_extraidos
                                 st.session_state.relatorio_estoque_meta = {
                                     "nome_arquivo": arquivo_relatorio.name,
-                                    "importado_em": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                                    "importado_em": agora_brasilia().strftime("%d/%m/%Y %H:%M"),
                                     "importado_por": st.session_state.usuario_atual,
                                 }
                                 processado_com_sucesso = True
@@ -3942,12 +3992,22 @@ elif st.session_state.aba_ativa_selecionada == "🚚 SGO — Próximas Entradas"
     st.markdown("<h3 style='text-align:center;color:#ffcc00;'>🚚 SGO — Próximas Entradas</h3>", unsafe_allow_html=True)
     st.markdown("<p style='text-align:center;color:#8892b0;'>Veja primeiro o que importa: quanto vem, quando chega e em que etapa está.</p>", unsafe_allow_html=True)
 
+    st.markdown(
+        "<div style='background:#1f2833; border:1px solid #45a29e; border-radius:10px; "
+        "padding:12px 16px; margin-bottom:14px; display:flex; align-items:center; gap:10px;'>"
+        "<span style='font-size:22px;'>✅</span>"
+        "<span style='color:#c5c6c7; font-size:13px;'>"
+        "<b style='color:#45a29e;'>Pode atualizar sem medo:</b> sempre que você sobe um arquivo novo, "
+        "a versão anterior do relatório do SGO é descartada automaticamente — não acumula relatório velho."
+        "</span></div>",
+        unsafe_allow_html=True,
+    )
     arquivo_sgo = st.file_uploader("📄 Relatório do SGO (.xlsx)", type=["xlsx"], key="upload_sgo_lotes")
     if arquivo_sgo is not None:
         try:
             df_sgo_novo = carregar_relatorio_sgo(arquivo_sgo)
             salvou, erro_bd = salvar_relatorio_sgo_supabase(df_sgo_novo, arquivo_sgo.name)
-            agora_sgo = datetime.now()
+            agora_sgo = agora_brasilia()
 
             if salvou:
                 st.session_state.sgo_relatorio_df = df_sgo_novo
@@ -3980,7 +4040,7 @@ elif st.session_state.aba_ativa_selecionada == "🚚 SGO — Próximas Entradas"
 
     _atualizado_em_sgo_topo = st.session_state.get("sgo_relatorio_atualizado_em")
     if _atualizado_em_sgo_topo:
-        _txt_topo_sgo = pd.Timestamp(_atualizado_em_sgo_topo).strftime("%d/%m/%Y às %H:%M")
+        _txt_topo_sgo = formatar_hora_brasilia(_atualizado_em_sgo_topo, "%d/%m/%Y às %H:%M")
         st.markdown(
             f"<div style='text-align:center; margin: 4px 0 18px 0;'>"
             f"<span style='background:#1f2833; border:1px solid #ffcc00; color:#ffcc00; "
