@@ -2350,6 +2350,7 @@ telas_devolucoes = [
 ]
 
 telas_qualidade = [
+    "📊 Dashboard Qualidade",
     "🧪 Qualidade — Defeitos (Avaria)",
 ]
 
@@ -2375,7 +2376,7 @@ telas_estocagem = [
     "📥 Entrada de Dados / Abastecimento",
 ]
 
-telas_administracao = ["📊 Dashboard Administração"]
+telas_administracao = []
 if st.session_state.papel_atual == "gerente":
     telas_administracao.append("🛠️ Gerenciador (Admin)")
 
@@ -2587,6 +2588,32 @@ def calcular_estatisticas_rua(rua_nome):
                 livres += 1
     return soma_fracoes, contagem, soma_pecas, livres
 
+def renderizar_servico_sgo(fase, chave_botao, titulo=None):
+    """Mostra os lotes do relatório do SGO que estão numa fase específica,
+    como 'serviço a executar' daquele setor — puxado direto do relatório
+    (st.session_state.sgo_relatorio_df), sem lançamento manual. Reaproveitada
+    pelos dashboards de Recebimento, Processamento, Estocagem e Qualidade —
+    é a mesma fonte de dado pros quatro, só filtrando a fase que interessa
+    pra cada um. Não desenha nada se não houver relatório carregado ou se
+    não tiver nenhum lote nessa fase."""
+    df_sgo = st.session_state.get("sgo_relatorio_df")
+    if df_sgo is None or df_sgo.empty or "Fase" not in df_sgo.columns:
+        return
+    pendente = df_sgo[df_sgo["Fase"] == fase].copy()
+    if pendente.empty:
+        return
+    st.markdown(f"<h4 style='color: #ffcc00;'>📋 {titulo or f'Serviço a executar — {fase}'}</h4>", unsafe_allow_html=True)
+    st.caption(f"{len(pendente)} lote(s) nessa fase, vindo do relatório do SGO.")
+    pendente = pendente.sort_values("DiasParado", ascending=False, na_position="last")
+    tabela = pendente[["Lote", "Grupo", "SKU", "Descrição", "Quantidade", "DiasParado"]].rename(
+        columns={"Quantidade": "Peças", "DiasParado": "Dias parado"}
+    )
+    st.dataframe(tabela, use_container_width=True, hide_index=True, height=min(300, 44 + 35 * len(tabela)))
+    if st.button("Ver relatório completo do SGO →", key=f"ir_sgo_{chave_botao}"):
+        st.session_state.aba_ativa_selecionada = "🚚 SGO — Próximas Entradas"
+        st.rerun()
+    st.write("---")
+
 def calcular_resumo_estocagem():
     """Resumo agregado de ocupação de casulos, usado tanto pelo Dashboard
     Estocagem quanto pela Visão Geral (todos os setores)."""
@@ -2682,26 +2709,7 @@ if st.session_state.aba_ativa_selecionada == "🏠 Visão Geral — Todos os Set
 elif st.session_state.aba_ativa_selecionada == "📊 Dashboard Estocagem":
     st.markdown("<h3 style='text-align: center; color: #ffcc00;'>📊 Painel Geral de Ocupação</h3>", unsafe_allow_html=True)
 
-    # Serviço a ser executado na Estocagem, vindo direto do relatório do SGO
-    # (Recebimento) — não é uma tarefa lançada manualmente, é o próprio SGO
-    # dizendo o que já chegou na fase "📦 Em Estocagem" e precisa ser
-    # guardado. Se o relatório for atualizado (reimportado, ou reaberto do
-    # Supabase), essa lista muda sozinha — as duas telas usam a mesma fonte.
-    df_sgo_estocagem = st.session_state.get("sgo_relatorio_df")
-    if df_sgo_estocagem is not None and not df_sgo_estocagem.empty and "Fase" in df_sgo_estocagem.columns:
-        pendente_estocagem = df_sgo_estocagem[df_sgo_estocagem["Fase"] == "📦 Em Estocagem"].copy()
-        if not pendente_estocagem.empty:
-            st.markdown("<h4 style='color: #ffcc00;'>📋 Serviço a executar (vindo do SGO)</h4>", unsafe_allow_html=True)
-            st.caption(f"{len(pendente_estocagem)} lote(s) já chegaram e estão aguardando guarda no CD.")
-            pendente_estocagem = pendente_estocagem.sort_values("DiasParado", ascending=False, na_position="last")
-            tabela_pendente = pendente_estocagem[["Lote", "Grupo", "SKU", "Descrição", "Quantidade", "DiasParado"]].rename(
-                columns={"Quantidade": "Peças", "DiasParado": "Dias parado"}
-            )
-            st.dataframe(tabela_pendente, use_container_width=True, hide_index=True, height=min(300, 44 + 35 * len(tabela_pendente)))
-            if st.button("Ver relatório completo do SGO →", key="dash_estoc_ir_sgo"):
-                st.session_state.aba_ativa_selecionada = "🚚 SGO — Próximas Entradas"
-                st.rerun()
-            st.write("---")
+    renderizar_servico_sgo("📦 Em Estocagem", "dash_estoc", "Serviço a executar — peças chegaram, aguardando guarda no CD")
 
     total_casulos, pct_geral, casulos_livres, total_pecas_atuais, estatisticas_por_rua = calcular_resumo_estocagem()
 
@@ -2765,33 +2773,31 @@ elif st.session_state.aba_ativa_selecionada == "📊 Dashboard Estocagem":
 
 # ==========================================
 # NOVOS DASHBOARDS — um por setor que ainda não tinha nenhuma tela própria
-# (Recebimento, Processamento, Expedição, Administração). Cada um traz o
-# quadro de tarefas daquele setor; Recebimento e Expedição também trazem
-# um resumo rápido do que já existe no setor (SGO / Expedição Teste).
+# (Recebimento, Processamento, Expedição). Cada um traz o serviço a
+# executar vindo do SGO (na fase que corresponde àquele setor) + o quadro
+# de tarefas. Administração não tem dashboard — só o Gerenciador mesmo.
 # ==========================================
 elif st.session_state.aba_ativa_selecionada == "📊 Dashboard Recebimento":
     st.markdown("<h3 style='text-align: center; color: #ffcc00;'>📊 Dashboard — Recebimento</h3>", unsafe_allow_html=True)
-    st.caption("Acompanhamento das entradas chegando no CD (SGO) e tarefas do setor.")
-    st.write("---")
+    renderizar_servico_sgo("🚚 Em Trânsito", "dash_receb", "Serviço a executar — mercadoria a caminho do CD")
     renderizar_quadro_tarefas("Recebimento", _usuarios_disponiveis_para_tarefas())
 
 elif st.session_state.aba_ativa_selecionada == "📊 Dashboard Processamento":
     st.markdown("<h3 style='text-align: center; color: #ffcc00;'>📊 Dashboard — Processamento</h3>", unsafe_allow_html=True)
-    st.caption("Setor ainda sem telas de processo próprias — por enquanto, só o quadro de tarefas.")
-    st.write("---")
+    renderizar_servico_sgo("🏭 Processamento", "dash_proc", "Serviço a executar — lotes em processamento")
     renderizar_quadro_tarefas("Processamento", _usuarios_disponiveis_para_tarefas())
 
 elif st.session_state.aba_ativa_selecionada == "📊 Dashboard Expedição":
     st.markdown("<h3 style='text-align: center; color: #ffcc00;'>📊 Dashboard — Expedição</h3>", unsafe_allow_html=True)
-    st.caption("Separação/expedição (modo teste) e o módulo de Devoluções ficam no submenu ao lado. Aqui: tarefas gerais do setor.")
+    st.caption("O SGO só acompanha entrada de mercadoria no CD, não expedição — por isso não tem uma lista de serviço aqui vinda dele, diferente dos outros setores. Separação/Expedição (Teste) e Devoluções ficam no submenu ao lado.")
     st.write("---")
     renderizar_quadro_tarefas("Expedição", _usuarios_disponiveis_para_tarefas())
 
-elif st.session_state.aba_ativa_selecionada == "📊 Dashboard Administração":
-    st.markdown("<h3 style='text-align: center; color: #ffcc00;'>📊 Dashboard — Administração</h3>", unsafe_allow_html=True)
-    st.caption("Tarefas administrativas do app (cadastros, ajustes de estrutura/capacidade, etc.)")
-    st.write("---")
-    renderizar_quadro_tarefas("Administração", _usuarios_disponiveis_para_tarefas())
+elif st.session_state.aba_ativa_selecionada == "📊 Dashboard Qualidade":
+    st.markdown("<h3 style='text-align: center; color: #ffcc00;'>📊 Dashboard — Qualidade</h3>", unsafe_allow_html=True)
+    renderizar_servico_sgo("🔎 Qualidade", "dash_qual", "Serviço a executar — lotes aguardando inspeção de qualidade")
+    renderizar_quadro_tarefas("Qualidade", _usuarios_disponiveis_para_tarefas())
+    st.caption("Indicadores de avaria (defeito) das Devoluções ficam na tela ao lado, '🧪 Qualidade — Defeitos (Avaria)'.")
 
 
 # ==========================================
