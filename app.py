@@ -2872,7 +2872,7 @@ elif st.session_state.aba_ativa_selecionada == "📦 Visualizador de Casulos":
         _sync_recente = _horas_desde_sync is not None and _horas_desde_sync < 6
         _confirma_sync_recente = True
         if _sync_recente:
-            st.image("assets/avisos/aviso_sync_menos_6h.png", use_container_width=True)
+            st.image("assets/avisos/aviso_sync_menos_6h.png", width=320)
             st.caption(f"A última sincronização foi há {_horas_desde_sync:.1f}h.")
             _confirma_sync_recente = st.checkbox(
                 "Sei que sincronizei há menos de 6h e quero sincronizar mesmo assim",
@@ -3983,7 +3983,7 @@ elif st.session_state.aba_ativa_selecionada == "🚚 SGO — Próximas Entradas"
     st.markdown("<h3 style='text-align:center;color:#ffcc00;'>🚚 SGO — Próximas Entradas</h3>", unsafe_allow_html=True)
     st.markdown("<p style='text-align:center;color:#8892b0;'>Veja primeiro o que importa: quanto vem, quando chega e em que etapa está.</p>", unsafe_allow_html=True)
 
-    st.image("assets/avisos/aviso_sgo_atualizado.png", use_container_width=True)
+    st.image("assets/avisos/aviso_sgo_atualizado.png", width=320)
     arquivo_sgo = st.file_uploader("📄 Relatório do SGO (.xlsx)", type=["xlsx"], key="upload_sgo_lotes")
     if arquivo_sgo is not None:
         try:
