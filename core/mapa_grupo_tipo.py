@@ -42,7 +42,7 @@ def carregar_mapa_grupo_tipo():
             cur.execute("SELECT grupo, tipo_estrutural FROM mapa_grupo_tipo_casulo")
             linhas = cur.fetchall()
         conn.close()
-        return {row["grupo"]: row["tipo_estrutural"] for row in linhas}
+        return {grupo: tipo for grupo, tipo in linhas}
     except Exception as e:
         try:
             conn.rollback()

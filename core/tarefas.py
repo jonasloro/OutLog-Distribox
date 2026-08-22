@@ -5,6 +5,7 @@ Administração, e o módulo de Devoluções dentro de Expedição) pode ter sua
 próprias tarefas, todas na mesma tabela `tarefas_app` do Supabase — dá pra
 ver todo mundo junto (Visão Geral) ou filtrado por setor (cada Dashboard).
 """
+import psycopg2.extras
 import streamlit as st
 
 from core.database import obter_conexao_bd
@@ -38,7 +39,7 @@ def carregar_tarefas(setor=None):
     if conn is None:
         return None
     try:
-        with conn.cursor() as cur:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             _garantir_tabela(cur)
             conn.commit()
             if setor:
