@@ -68,6 +68,11 @@ SQL_ALTERACOES = [
     "ALTER TABLE tarefas_app ADD COLUMN IF NOT EXISTS quantidade_real INTEGER",
     "ALTER TABLE tarefas_app ADD COLUMN IF NOT EXISTS concluido_em TIMESTAMP",
     "ALTER TABLE tarefas_app ADD COLUMN IF NOT EXISTS lote_sgo TEXT",
+    "ALTER TABLE tarefas_app ADD COLUMN IF NOT EXISTS responsaveis TEXT[] DEFAULT '{}'",
+]
+
+SQL_ALTERACOES_HISTORICO = [
+    "ALTER TABLE historico_producao_tempo ADD COLUMN IF NOT EXISTS pessoas INTEGER NOT NULL DEFAULT 1",
 ]
 
 SQL_CRIAR_HISTORICO = """
@@ -95,6 +100,11 @@ def _garantir_tabela(cur):
         cur.execute(SQL_CRIAR_HISTORICO)
     except Exception:
         pass
+    for alteracao in SQL_ALTERACOES_HISTORICO:
+        try:
+            cur.execute(alteracao)
+        except Exception:
+            pass
 
 
 def carregar_tarefas(setor=None):
@@ -138,21 +148,29 @@ def carregar_tarefas(setor=None):
         return None
 
 
-def criar_tarefa(titulo, descricao, setor, responsavel, criado_por, status=None, grupo=None, marca=None, tipo=None, quantidade_prevista=None, lote_sgo=None):
+def criar_tarefa(titulo, descricao, setor, responsavel, criado_por, status=None, grupo=None, marca=None, tipo=None, quantidade_prevista=None, lote_sgo=None, responsaveis=None):
     """Cria uma tarefa nova. Se `status` não for informado, usa 'Em Execução'
     quando já vem com responsável (estilo Monday: atribuir = já começou) ou
     'A Fazer' quando não vem. Se já nasce 'Em Execução', já marca o início
     (iniciado_em) — importante pra previsão de tempo funcionar mesmo em
     tarefas criadas direto na coluna 'Em Execução'.
 
+    `responsaveis` (lista de nomes) é o campo usado pelo Quadro de Tarefas
+    em cards (Processamento) pra permitir mais de uma pessoa na mesma
+    tarefa; `responsavel` (singular) continua sendo o campo usado pela
+    tabela única dos outros setores. Se `responsaveis` vier preenchido e
+    `responsavel` não, ele também conta pra decidir o status inicial.
+
     `quantidade_prevista` é exigido pela UI (não pelo banco, pra não quebrar
     linhas antigas) — todo formulário de criação, manual ou vindo de
     sugestão do SGO, obriga esse número antes de deixar criar."""
-    status_final = status or ("Em Execução" if responsavel else "A Fazer")
+    tem_responsavel = bool(responsavel) or bool(responsaveis)
+    status_final = status or ("Em Execução" if tem_responsavel else "A Fazer")
     grupo = grupo or None
     marca = marca or None
     tipo = tipo or None
     lote_sgo = lote_sgo or None
+    responsaveis = responsaveis or []
     conn = obter_conexao_bd()
     if conn is None:
         return False
@@ -161,15 +179,15 @@ def criar_tarefa(titulo, descricao, setor, responsavel, criado_por, status=None,
             _garantir_tabela(cur)
             if status_final == "Em Execução":
                 cur.execute(
-                    "INSERT INTO tarefas_app (titulo, descricao, setor, responsavel, criado_por, status, grupo, marca, tipo, quantidade_prevista, lote_sgo, iniciado_em) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())",
-                    (titulo, descricao, setor, responsavel, criado_por, status_final, grupo, marca, tipo, quantidade_prevista, lote_sgo),
+                    "INSERT INTO tarefas_app (titulo, descricao, setor, responsavel, criado_por, status, grupo, marca, tipo, quantidade_prevista, lote_sgo, responsaveis, iniciado_em) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())",
+                    (titulo, descricao, setor, responsavel, criado_por, status_final, grupo, marca, tipo, quantidade_prevista, lote_sgo, responsaveis),
                 )
             else:
                 cur.execute(
-                    "INSERT INTO tarefas_app (titulo, descricao, setor, responsavel, criado_por, status, grupo, marca, tipo, quantidade_prevista, lote_sgo) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                    (titulo, descricao, setor, responsavel, criado_por, status_final, grupo, marca, tipo, quantidade_prevista, lote_sgo),
+                    "INSERT INTO tarefas_app (titulo, descricao, setor, responsavel, criado_por, status, grupo, marca, tipo, quantidade_prevista, lote_sgo, responsaveis) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (titulo, descricao, setor, responsavel, criado_por, status_final, grupo, marca, tipo, quantidade_prevista, lote_sgo, responsaveis),
                 )
         conn.commit()
         conn.close()
@@ -208,7 +226,7 @@ def atualizar_tarefa(tarefa_id, **campos):
 
     campos_validos = {
         "titulo", "descricao", "status", "responsavel", "grupo", "marca", "tipo",
-        "quantidade_prevista", "quantidade_real", "concluido_em", "lote_sgo",
+        "quantidade_prevista", "quantidade_real", "concluido_em", "lote_sgo", "responsaveis",
     }
     campos = {k: v for k, v in campos.items() if k in campos_validos}
     if "responsavel" in campos and campos["responsavel"] == "":
@@ -224,15 +242,16 @@ def atualizar_tarefa(tarefa_id, **campos):
             extra_set_sql = []
             if concluir:
                 cur.execute(
-                    "SELECT grupo, marca, iniciado_em FROM tarefas_app WHERE id = %s",
+                    "SELECT grupo, marca, iniciado_em, responsaveis FROM tarefas_app WHERE id = %s",
                     (tarefa_id,),
                 )
                 atual = cur.fetchone()
                 if atual and atual["iniciado_em"] and atual["grupo"] and atual["marca"]:
+                    pessoas = max(1, len(atual["responsaveis"] or []))
                     cur.execute(
-                        "INSERT INTO historico_producao_tempo (grupo, marca, minutos, concluido_em) "
-                        "VALUES (%s, %s, EXTRACT(EPOCH FROM (now() - %s)) / 60, now())",
-                        (atual["grupo"], atual["marca"], atual["iniciado_em"]),
+                        "INSERT INTO historico_producao_tempo (grupo, marca, minutos, pessoas, concluido_em) "
+                        "VALUES (%s, %s, EXTRACT(EPOCH FROM (now() - %s)) / 60, %s, now())",
+                        (atual["grupo"], atual["marca"], atual["iniciado_em"], pessoas),
                     )
                 campos["iniciado_em"] = None
                 extra_set_sql.append("concluido_em = now()")
@@ -280,12 +299,26 @@ def remover_tarefa(tarefa_id):
         return False
 
 
-def calcular_previsao_tempo(grupo, marca):
-    """Média (em minutos) do histórico de produção pra esse Grupo+Marca.
+def calcular_previsao_tempo(grupo, marca, pessoas_planejadas=1):
+    """Previsão de tempo (em minutos) pra esse Grupo+Marca, ajustada pelo
+    número de pessoas planejadas pra executar.
+
+    O histórico guarda, por tarefa concluída, quantos minutos ela levou E
+    quantas pessoas trabalharam nela (`pessoas`). A partir disso calcula um
+    "esforço" médio (minutos × pessoas — quanto tempo-pessoa aquele
+    Grupo+Marca costuma consumir no total) e divide esse esforço pelo
+    número de pessoas planejadas pra essa execução específica. É uma
+    aproximação simples (assume que dividir o trabalho entre mais gente
+    acelera de forma proporcional, o que nem sempre é verdade na prática)
+    — melhora conforme o histórico for acumulando tarefas com times de
+    tamanhos diferentes.
+
     Retorna None se não conseguiu conectar ou não tiver histórico ainda;
-    senão {"media_minutos": float, "amostras": int}."""
+    senão {"media_minutos": float (já ajustado pra pessoas_planejadas),
+    "amostras": int}."""
     if not grupo or not marca:
         return None
+    pessoas_planejadas = max(1, int(pessoas_planejadas or 1))
     conn = obter_conexao_bd()
     if conn is None:
         return None
@@ -293,14 +326,14 @@ def calcular_previsao_tempo(grupo, marca):
         with conn.cursor() as cur:
             _garantir_tabela(cur)
             cur.execute(
-                "SELECT AVG(minutos), COUNT(*) FROM historico_producao_tempo WHERE grupo = %s AND marca = %s",
+                "SELECT AVG(minutos * pessoas), COUNT(*) FROM historico_producao_tempo WHERE grupo = %s AND marca = %s",
                 (grupo, marca),
             )
-            media, contagem = cur.fetchone()
+            esforco_medio, contagem = cur.fetchone()
         conn.close()
         if not contagem:
             return None
-        return {"media_minutos": float(media), "amostras": int(contagem)}
+        return {"media_minutos": float(esforco_medio) / pessoas_planejadas, "amostras": int(contagem)}
     except Exception as e:
         try:
             conn.rollback()
@@ -445,7 +478,10 @@ def renderizar_paineis_tarefas(setor, usuarios_disponiveis=None, tipos_disponive
     Processamento assim que a tarefa é concluída. Toda tarefa exige uma
     Quantidade Prevista já na criação; ao mover pra Concluída, pede a
     Quantidade Real antes de confirmar. Cards concluídos somem do quadro
-    depois de 1 dia (carregar_tarefas já filtra isso).
+    depois de 1 dia (carregar_tarefas já filtra isso). Aceita mais de um
+    Responsável por tarefa (multiselect) — o histórico de tempo grava
+    quantas pessoas trabalharam em cada tarefa concluída, e a previsão de
+    tempo do Dashboard já divide o esforço estimado pelo número de pessoas.
 
     `sugestoes_sgo`, se passado, é uma lista de dicts {lote, grupo,
     descricao, quantidade, marca} — lotes do relatório do SGO já na fase
@@ -500,7 +536,10 @@ def renderizar_paineis_tarefas(setor, usuarios_disponiveis=None, tipos_disponive
             with col_a:
                 titulo_novo = st.text_input("Título")
                 tipo_novo = st.selectbox("Tipo", tipos_disponiveis, key=f"tipo_novo_{setor}")
-                responsavel_novo = st.selectbox("Responsável (opcional)", opcoes_responsavel, key=f"resp_novo_paineis_{setor}")
+                responsaveis_novo = st.multiselect(
+                    "Responsáveis (opcional)", [o for o in opcoes_responsavel if o != SEM_RESPONSAVEL],
+                    key=f"resp_novo_paineis_{setor}",
+                )
                 quantidade_prevista_nova = st.number_input("Quantidade Prevista (obrigatório)", min_value=1, step=1, value=1)
             with col_b:
                 descricao_nova = st.text_area("Descrição (opcional)", height=68)
@@ -511,12 +550,12 @@ def renderizar_paineis_tarefas(setor, usuarios_disponiveis=None, tipos_disponive
                 if not titulo_novo.strip():
                     st.error("Dê um título pra tarefa.")
                 else:
-                    resp = None if responsavel_novo == SEM_RESPONSAVEL else responsavel_novo
                     ok = criar_tarefa(
-                        titulo_novo.strip(), descricao_nova.strip(), setor, resp,
+                        titulo_novo.strip(), descricao_nova.strip(), setor, None,
                         st.session_state.get("usuario_atual"), tipo=tipo_novo,
                         grupo=grupo_novo.strip() or None, marca=marca_novo.strip() or None,
                         quantidade_prevista=int(quantidade_prevista_nova),
+                        responsaveis=responsaveis_novo,
                     )
                     if ok:
                         st.success("Tarefa criada.")
@@ -572,18 +611,20 @@ def _renderizar_card_tarefa(t, status, setor, opcoes_responsavel):
         elif qtd_prevista is not None:
             st.caption(f"🎯 Previsto: {qtd_prevista} pçs")
 
-        resp_atual = t["responsavel"] or SEM_RESPONSAVEL
-        idx_resp = opcoes_responsavel.index(resp_atual) if resp_atual in opcoes_responsavel else 0
-        novo_resp = st.selectbox(
-            "Responsável", opcoes_responsavel, index=idx_resp,
-            key=f"resp_{setor}_{tid}", label_visibility="collapsed",
+        resp_atuais = t.get("responsaveis") or []
+        opcoes_multiselect = [o for o in opcoes_responsavel if o != SEM_RESPONSAVEL]
+        novos_resp = st.multiselect(
+            "Responsáveis", opcoes_multiselect, default=[r for r in resp_atuais if r in opcoes_multiselect],
+            key=f"resp_{setor}_{tid}", label_visibility="collapsed", placeholder="Ninguém designado ainda",
         )
-        if novo_resp != resp_atual:
-            campos = {"responsavel": novo_resp}
-            if novo_resp and status == "A Fazer":
+        if len(novos_resp) > 1:
+            st.caption(f"👥 {len(novos_resp)} pessoas — tende a concluir mais rápido que sozinho")
+        if set(novos_resp) != set(resp_atuais):
+            campos = {"responsaveis": novos_resp}
+            if novos_resp and status == "A Fazer":
                 campos["status"] = "Em Execução"
                 campos["iniciar"] = True
-            elif not novo_resp and status == "Em Execução":
+            elif not novos_resp and status == "Em Execução":
                 campos["status"] = "A Fazer"
                 campos["iniciado_em"] = None
             if atualizar_tarefa(tid, **campos):
