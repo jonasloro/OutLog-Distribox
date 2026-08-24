@@ -10,6 +10,12 @@ a coluna Responsável move a tarefa automaticamente pra "Em Execução", e
 limpar o Responsável volta pra "A Fazer". O Status também pode ser mudado
 manualmente (ex.: marcar como Concluída) — nesse caso a mudança manual tem
 prioridade sobre a automática feita na mesma edição.
+
+Tarefas de produção (setor Processamento) podem carregar Grupo + Marca.
+Toda vez que uma tarefa entra em "Em Execução" o app marca o horário de
+início (`iniciado_em`); quando ela é concluída, grava quanto tempo levou
+num histórico (`historico_producao_tempo`), associado ao par Grupo+Marca —
+é a base da previsão de tempo de produção do Dashboard Processamento.
 """
 import pandas as pd
 import psycopg2.extras
@@ -34,10 +40,38 @@ CREATE TABLE IF NOT EXISTS tarefas_app (
 );
 """
 
+# Colunas adicionadas depois da criação original da tabela — ADD COLUMN IF
+# NOT EXISTS pra não quebrar instalações que já tinham tarefas_app antes
+# dessas colunas existirem.
+SQL_ALTERACOES = [
+    "ALTER TABLE tarefas_app ADD COLUMN IF NOT EXISTS grupo TEXT",
+    "ALTER TABLE tarefas_app ADD COLUMN IF NOT EXISTS marca TEXT",
+    "ALTER TABLE tarefas_app ADD COLUMN IF NOT EXISTS iniciado_em TIMESTAMP",
+]
+
+SQL_CRIAR_HISTORICO = """
+CREATE TABLE IF NOT EXISTS historico_producao_tempo (
+    id SERIAL PRIMARY KEY,
+    grupo TEXT NOT NULL,
+    marca TEXT NOT NULL,
+    minutos NUMERIC NOT NULL,
+    concluido_em TIMESTAMP NOT NULL DEFAULT now()
+);
+"""
+
 
 def _garantir_tabela(cur):
     try:
         cur.execute(SQL_CRIAR_TABELA)
+    except Exception:
+        pass
+    for alteracao in SQL_ALTERACOES:
+        try:
+            cur.execute(alteracao)
+        except Exception:
+            pass
+    try:
+        cur.execute(SQL_CRIAR_HISTORICO)
     except Exception:
         pass
 
@@ -76,22 +110,33 @@ def carregar_tarefas(setor=None):
         return None
 
 
-def criar_tarefa(titulo, descricao, setor, responsavel, criado_por, status=None):
+def criar_tarefa(titulo, descricao, setor, responsavel, criado_por, status=None, grupo=None, marca=None):
     """Cria uma tarefa nova. Se `status` não for informado, usa 'Em Execução'
     quando já vem com responsável (estilo Monday: atribuir = já começou) ou
-    'A Fazer' quando não vem."""
+    'A Fazer' quando não vem. Se já nasce 'Em Execução', já marca o início
+    (iniciado_em) — importante pra previsão de tempo funcionar mesmo em
+    tarefas criadas direto na coluna 'Em Execução'."""
     status_final = status or ("Em Execução" if responsavel else "A Fazer")
+    grupo = grupo or None
+    marca = marca or None
     conn = obter_conexao_bd()
     if conn is None:
         return False
     try:
         with conn.cursor() as cur:
             _garantir_tabela(cur)
-            cur.execute(
-                "INSERT INTO tarefas_app (titulo, descricao, setor, responsavel, criado_por, status) "
-                "VALUES (%s, %s, %s, %s, %s, %s)",
-                (titulo, descricao, setor, responsavel, criado_por, status_final),
-            )
+            if status_final == "Em Execução":
+                cur.execute(
+                    "INSERT INTO tarefas_app (titulo, descricao, setor, responsavel, criado_por, status, grupo, marca, iniciado_em) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())",
+                    (titulo, descricao, setor, responsavel, criado_por, status_final, grupo, marca),
+                )
+            else:
+                cur.execute(
+                    "INSERT INTO tarefas_app (titulo, descricao, setor, responsavel, criado_por, status, grupo, marca) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                    (titulo, descricao, setor, responsavel, criado_por, status_final, grupo, marca),
+                )
         conn.commit()
         conn.close()
         return True
@@ -106,13 +151,24 @@ def criar_tarefa(titulo, descricao, setor, responsavel, criado_por, status=None)
 
 
 def atualizar_tarefa(tarefa_id, **campos):
-    """Atualiza qualquer combinação de titulo/descricao/status/responsavel.
-    Passe só os campos que mudaram, ex.: atualizar_tarefa(5, status="Concluída").
-    `responsavel=""` grava NULL (limpa o responsável)."""
-    campos_validos = {"titulo", "descricao", "status", "responsavel"}
+    """Atualiza qualquer combinação de titulo/descricao/status/responsavel/
+    grupo/marca. `responsavel=""` grava NULL (limpa o responsável).
+
+    Dois campos especiais, não gravados diretamente:
+    - iniciar=True: marca iniciado_em = now() (só se ainda não tinha um
+      início em aberto — não reinicia o cronômetro de uma tarefa já
+      rodando).
+    - concluir=True: fecha o ciclo — grava no histórico de tempo de
+      produção quantos minutos essa tarefa levou (agora - iniciado_em),
+      usando o Grupo/Marca que a tarefa tem no banco. Só grava histórico
+      se a tarefa tinha iniciado_em E Grupo E Marca preenchidos; senão só
+      limpa o iniciado_em silenciosamente (tarefa sem esses dados não
+      entra na previsão, mas não trava a conclusão)."""
+    iniciar = bool(campos.pop("iniciar", False))
+    concluir = bool(campos.pop("concluir", False))
+
+    campos_validos = {"titulo", "descricao", "status", "responsavel", "grupo", "marca"}
     campos = {k: v for k, v in campos.items() if k in campos_validos}
-    if not campos:
-        return True
     if "responsavel" in campos and campos["responsavel"] == "":
         campos["responsavel"] = None
 
@@ -120,11 +176,31 @@ def atualizar_tarefa(tarefa_id, **campos):
     if conn is None:
         return False
     try:
-        with conn.cursor() as cur:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             _garantir_tabela(cur)
-            set_sql = ", ".join(f"{col} = %s" for col in campos) + ", atualizado_em = now()"
-            valores = list(campos.values()) + [tarefa_id]
-            cur.execute(f"UPDATE tarefas_app SET {set_sql} WHERE id = %s", valores)
+
+            if concluir:
+                cur.execute(
+                    "SELECT grupo, marca, iniciado_em FROM tarefas_app WHERE id = %s",
+                    (tarefa_id,),
+                )
+                atual = cur.fetchone()
+                if atual and atual["iniciado_em"] and atual["grupo"] and atual["marca"]:
+                    cur.execute(
+                        "INSERT INTO historico_producao_tempo (grupo, marca, minutos, concluido_em) "
+                        "VALUES (%s, %s, EXTRACT(EPOCH FROM (now() - %s)) / 60, now())",
+                        (atual["grupo"], atual["marca"], atual["iniciado_em"]),
+                    )
+                campos["iniciado_em"] = None
+
+            set_partes = [f"{col} = %s" for col in campos]
+            valores = list(campos.values())
+            if iniciar:
+                set_partes.append("iniciado_em = COALESCE(iniciado_em, now())")
+            if set_partes:
+                set_partes.append("atualizado_em = now()")
+                valores.append(tarefa_id)
+                cur.execute(f"UPDATE tarefas_app SET {', '.join(set_partes)} WHERE id = %s", valores)
         conn.commit()
         conn.close()
         return True
@@ -159,17 +235,113 @@ def remover_tarefa(tarefa_id):
         return False
 
 
-def renderizar_quadro_tarefas(setor, usuarios_disponiveis=None, mostrar_titulo=True):
-    """Widget pronto: tabela editável (estilo Monday 'Main Table').
+def calcular_previsao_tempo(grupo, marca):
+    """Média (em minutos) do histórico de produção pra esse Grupo+Marca.
+    Retorna None se não conseguiu conectar ou não tiver histórico ainda;
+    senão {"media_minutos": float, "amostras": int}."""
+    if not grupo or not marca:
+        return None
+    conn = obter_conexao_bd()
+    if conn is None:
+        return None
+    try:
+        with conn.cursor() as cur:
+            _garantir_tabela(cur)
+            cur.execute(
+                "SELECT AVG(minutos), COUNT(*) FROM historico_producao_tempo WHERE grupo = %s AND marca = %s",
+                (grupo, marca),
+            )
+            media, contagem = cur.fetchone()
+        conn.close()
+        if not contagem:
+            return None
+        return {"media_minutos": float(media), "amostras": int(contagem)}
+    except Exception as e:
+        try:
+            conn.rollback()
+            conn.close()
+        except Exception:
+            pass
+        st.session_state.ultimo_erro_bd = f"falha ao calcular previsão de tempo: {e}"
+        return None
 
-    - Editar a coluna Responsável e sair da célula já aplica a mudança.
-    - Preencher Responsável numa tarefa 'A Fazer' move ela pra 'Em Execução'
-      automaticamente; limpar o Responsável de uma tarefa 'Em Execução' volta
-      ela pra 'A Fazer'. Mudar o Status manualmente na mesma edição tem
-      prioridade sobre essa regra automática.
-    - Última linha em branco serve pra criar tarefa nova (basta preencher o
-      Título; Responsável é opcional).
-    - Apagar uma linha (menu de contexto da tabela) remove a tarefa.
+
+def _aplicar_edicoes_tabela(df, estado, setor, criado_por, status_fixo_para_novas=None):
+    """Lógica compartilhada entre a tabela única (renderizar_quadro_tarefas)
+    e os 3 quadros separados (renderizar_paineis_tarefas): processa
+    edited_rows/added_rows/deleted_rows de um st.data_editor e aplica no
+    banco. Retorna True se algo mudou (pra quem chamou decidir se dá
+    st.rerun())."""
+    houve_mudanca = False
+
+    for idx, mudancas in estado.get("edited_rows", {}).items():
+        linha_original = df.iloc[idx]
+        tarefa_id = linha_original["id"]
+        campos_para_salvar = dict(mudancas)
+
+        if "responsavel" in mudancas and "status" not in mudancas:
+            novo_responsavel = mudancas["responsavel"]
+            status_atual = linha_original["status"]
+            if novo_responsavel and status_atual == "A Fazer":
+                campos_para_salvar["status"] = "Em Execução"
+            elif not novo_responsavel and status_atual == "Em Execução":
+                campos_para_salvar["status"] = "A Fazer"
+                campos_para_salvar["iniciado_em"] = None
+
+        status_final = campos_para_salvar.get("status")
+        if status_final == "Em Execução" and linha_original["status"] != "Em Execução":
+            campos_para_salvar["iniciar"] = True
+        if status_final == "Concluída" and linha_original["status"] != "Concluída":
+            campos_para_salvar["concluir"] = True
+
+        if atualizar_tarefa(tarefa_id, **campos_para_salvar):
+            houve_mudanca = True
+        else:
+            st.error(f"Não foi possível salvar a alteração. `{st.session_state.get('ultimo_erro_bd')}`")
+
+    for nova in estado.get("added_rows", []):
+        titulo = (nova.get("titulo") or "").strip()
+        if not titulo:
+            continue
+        responsavel = nova.get("responsavel") or None
+        descricao = (nova.get("descricao") or "").strip()
+        grupo = (nova.get("grupo") or "").strip() or None
+        marca = (nova.get("marca") or "").strip() or None
+        status_nova = status_fixo_para_novas or nova.get("status")
+        if criar_tarefa(titulo, descricao, setor, responsavel, criado_por, status=status_nova, grupo=grupo, marca=marca):
+            houve_mudanca = True
+        else:
+            st.error(f"Não foi possível criar a tarefa. `{st.session_state.get('ultimo_erro_bd')}`")
+
+    for idx in estado.get("deleted_rows", []):
+        tarefa_id = df.iloc[idx]["id"]
+        if remover_tarefa(tarefa_id):
+            houve_mudanca = True
+
+    return houve_mudanca
+
+
+def _df_de_tarefas(tarefas):
+    linhas = [
+        {
+            "id": t["id"],
+            "titulo": t["titulo"],
+            "descricao": t["descricao"] or "",
+            "responsavel": t["responsavel"] or SEM_RESPONSAVEL,
+            "status": t["status"],
+            "grupo": t.get("grupo") or "",
+            "marca": t.get("marca") or "",
+            "atualizado": t["atualizado_em"].strftime("%d/%m %H:%M") if t["atualizado_em"] else "",
+        }
+        for t in tarefas
+    ]
+    return pd.DataFrame(linhas, columns=["id", "titulo", "descricao", "responsavel", "status", "grupo", "marca", "atualizado"])
+
+
+def renderizar_quadro_tarefas(setor, usuarios_disponiveis=None, mostrar_titulo=True):
+    """Widget pronto: tabela única editável (estilo Monday 'Main Table'),
+    com as três colunas de status misturadas na mesma tabela. Ver
+    `renderizar_paineis_tarefas` pra três quadros separados por status.
     """
     if mostrar_titulo:
         st.markdown("<h4 style='color: #ffcc00;'>📋 Quadro de Tarefas</h4>", unsafe_allow_html=True)
@@ -181,19 +353,7 @@ def renderizar_quadro_tarefas(setor, usuarios_disponiveis=None, mostrar_titulo=T
 
     usuarios_disponiveis = usuarios_disponiveis or []
     opcoes_responsavel = [SEM_RESPONSAVEL] + usuarios_disponiveis
-
-    linhas = [
-        {
-            "id": t["id"],
-            "titulo": t["titulo"],
-            "descricao": t["descricao"] or "",
-            "responsavel": t["responsavel"] or SEM_RESPONSAVEL,
-            "status": t["status"],
-            "atualizado": t["atualizado_em"].strftime("%d/%m %H:%M") if t["atualizado_em"] else "",
-        }
-        for t in tarefas
-    ]
-    df = pd.DataFrame(linhas, columns=["id", "titulo", "descricao", "responsavel", "status", "atualizado"])
+    df = _df_de_tarefas(tarefas)
 
     editor_key = f"tabela_tarefas_{setor}"
     st.data_editor(
@@ -207,56 +367,66 @@ def renderizar_quadro_tarefas(setor, usuarios_disponiveis=None, mostrar_titulo=T
             "id": None,
             "titulo": st.column_config.TextColumn("Tarefa", required=True, width="medium"),
             "descricao": st.column_config.TextColumn("Descrição", width="large"),
-            "responsavel": st.column_config.SelectboxColumn(
-                "Responsável", options=opcoes_responsavel, width="small",
-            ),
-            "status": st.column_config.SelectboxColumn(
-                "Status", options=STATUS_TAREFA, width="small",
-            ),
+            "responsavel": st.column_config.SelectboxColumn("Responsável", options=opcoes_responsavel, width="small"),
+            "status": st.column_config.SelectboxColumn("Status", options=STATUS_TAREFA, width="small"),
+            "grupo": st.column_config.TextColumn("Grupo", width="small"),
+            "marca": st.column_config.TextColumn("Marca", width="small"),
             "atualizado": st.column_config.TextColumn("Atualizado em", disabled=True, width="small"),
         },
     )
 
     estado = st.session_state.get(editor_key, {})
+    if _aplicar_edicoes_tabela(df, estado, setor, st.session_state.get("usuario_atual")):
+        st.rerun()
+
+
+def renderizar_paineis_tarefas(setor, usuarios_disponiveis=None):
+    """Três quadros separados (A Fazer / Em Execução / Concluída), cada um
+    sua própria tabela editável — pensado pra tela dedicada "Quadro de
+    Tarefas" do setor Processamento, onde faz sentido ver cada fase em
+    bloco próprio em vez de uma tabela só misturada.
+
+    Tarefas de produção podem levar Grupo + Marca — usados pela previsão
+    de tempo do Dashboard Processamento assim que a tarefa é concluída.
+    """
+    tarefas = carregar_tarefas(setor)
+    if tarefas is None:
+        st.warning(f"⚠️ Não foi possível carregar as tarefas. Detalhe: `{st.session_state.get('ultimo_erro_bd')}`")
+        return
+
+    usuarios_disponiveis = usuarios_disponiveis or []
+    opcoes_responsavel = [SEM_RESPONSAVEL] + usuarios_disponiveis
+    df_completo = _df_de_tarefas(tarefas)
+
     houve_mudanca = False
+    emojis = {"A Fazer": "⬜", "Em Execução": "🟡", "Concluída": "✅"}
 
-    # Linhas editadas (por índice da linha na tabela mostrada)
-    for idx, mudancas in estado.get("edited_rows", {}).items():
-        linha_original = df.iloc[idx]
-        tarefa_id = linha_original["id"]
-        campos_para_salvar = dict(mudancas)
+    for status in STATUS_TAREFA:
+        st.markdown(f"<h4 style='color: #ffcc00;'>{emojis[status]} {status}</h4>", unsafe_allow_html=True)
+        df_status = df_completo[df_completo["status"] == status].reset_index(drop=True)
 
-        # Regra automática: se mexeu no responsável e não mexeu no status
-        # na mesma edição, deriva o status.
-        if "responsavel" in mudancas and "status" not in mudancas:
-            novo_responsavel = mudancas["responsavel"]
-            status_atual = linha_original["status"]
-            if novo_responsavel and status_atual == "A Fazer":
-                campos_para_salvar["status"] = "Em Execução"
-            elif not novo_responsavel and status_atual == "Em Execução":
-                campos_para_salvar["status"] = "A Fazer"
+        editor_key = f"painel_tarefas_{setor}_{status}"
+        st.data_editor(
+            df_status,
+            key=editor_key,
+            hide_index=True,
+            num_rows="dynamic",
+            use_container_width=True,
+            column_order=["titulo", "descricao", "responsavel", "grupo", "marca", "atualizado"],
+            column_config={
+                "id": None,
+                "status": None,
+                "titulo": st.column_config.TextColumn("Tarefa", required=True, width="medium"),
+                "descricao": st.column_config.TextColumn("Descrição", width="large"),
+                "responsavel": st.column_config.SelectboxColumn("Responsável", options=opcoes_responsavel, width="small"),
+                "grupo": st.column_config.TextColumn("Grupo", width="small", help="Usado na previsão de tempo (opcional)"),
+                "marca": st.column_config.TextColumn("Marca", width="small", help="Usado na previsão de tempo (opcional)"),
+                "atualizado": st.column_config.TextColumn("Atualizado em", disabled=True, width="small"),
+            },
+        )
 
-        if atualizar_tarefa(tarefa_id, **campos_para_salvar):
-            houve_mudanca = True
-        else:
-            st.error(f"Não foi possível salvar a alteração. `{st.session_state.get('ultimo_erro_bd')}`")
-
-    # Linhas novas (adicionadas na última linha em branco da tabela)
-    for nova in estado.get("added_rows", []):
-        titulo = (nova.get("titulo") or "").strip()
-        if not titulo:
-            continue
-        responsavel = nova.get("responsavel") or None
-        descricao = (nova.get("descricao") or "").strip()
-        if criar_tarefa(titulo, descricao, setor, responsavel, st.session_state.get("usuario_atual")):
-            houve_mudanca = True
-        else:
-            st.error(f"Não foi possível criar a tarefa. `{st.session_state.get('ultimo_erro_bd')}`")
-
-    # Linhas removidas
-    for idx in estado.get("deleted_rows", []):
-        tarefa_id = df.iloc[idx]["id"]
-        if remover_tarefa(tarefa_id):
+        estado = st.session_state.get(editor_key, {})
+        if _aplicar_edicoes_tabela(df_status, estado, setor, st.session_state.get("usuario_atual"), status_fixo_para_novas=status):
             houve_mudanca = True
 
     if houve_mudanca:
