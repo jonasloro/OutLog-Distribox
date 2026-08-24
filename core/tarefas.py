@@ -197,17 +197,38 @@ def renderizar_quadro_tarefas(setor, usuarios_disponiveis=None, mostrar_titulo=T
                         st.caption(t["descricao"])
                     st.caption(f"👤 {responsavel_txt}")
 
-                    outros_status = [s for s in STATUS_TAREFA if s != status]
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        novo_status = st.selectbox(
-                            "Mover para", outros_status, key=f"mover_{setor}_{t['id']}",
-                            label_visibility="collapsed",
-                        )
-                    with c2:
-                        if st.button("➡️", key=f"btn_mover_{setor}_{t['id']}", use_container_width=True):
-                            if atualizar_tarefa(t["id"], status=novo_status):
+                    if status == "A Fazer":
+                        # Estilo Monday: "pegar a tarefa" atribui o usuário atual
+                        # e já move pra Em Execução, numa ação só.
+                        if st.button(
+                            "🚀 Iniciar tarefa", key=f"btn_iniciar_{setor}_{t['id']}",
+                            use_container_width=True, type="primary",
+                        ):
+                            usuario_atual = st.session_state.get("usuario_atual")
+                            if atualizar_tarefa(t["id"], status="Em Execução", responsavel=usuario_atual):
                                 st.rerun()
+                        with st.expander("Mover manualmente"):
+                            outros_status = [s for s in STATUS_TAREFA if s != status]
+                            novo_status = st.selectbox(
+                                "Mover para", outros_status, key=f"mover_{setor}_{t['id']}",
+                                label_visibility="collapsed",
+                            )
+                            if st.button("➡️ Mover", key=f"btn_mover_{setor}_{t['id']}", use_container_width=True):
+                                if atualizar_tarefa(t["id"], status=novo_status):
+                                    st.rerun()
+                    else:
+                        outros_status = [s for s in STATUS_TAREFA if s != status]
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            novo_status = st.selectbox(
+                                "Mover para", outros_status, key=f"mover_{setor}_{t['id']}",
+                                label_visibility="collapsed",
+                            )
+                        with c2:
+                            if st.button("➡️", key=f"btn_mover_{setor}_{t['id']}", use_container_width=True):
+                                if atualizar_tarefa(t["id"], status=novo_status):
+                                    st.rerun()
+
                     if st.button("🗑️ Remover", key=f"btn_remover_{setor}_{t['id']}", use_container_width=True):
                         if remover_tarefa(t["id"]):
                             st.rerun()
