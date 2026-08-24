@@ -2980,12 +2980,16 @@ elif st.session_state.aba_ativa_selecionada == "🗂️ Quadro de Tarefas":
         _pendentes_proc = _df_sgo_para_sugestoes[_df_sgo_para_sugestoes["Fase"] == "🏭 Processamento"]
         for _, _linha_sugestao in _pendentes_proc.iterrows():
             _grupo_sugestao = _linha_sugestao.get("Grupo")
-            _descricao_sugestao = _linha_sugestao.get("Descrição") or ""
+            _grupo_sugestao = None if pd.isna(_grupo_sugestao) else str(_grupo_sugestao)
+            _descricao_sugestao = _linha_sugestao.get("Descrição")
+            _descricao_sugestao = "" if pd.isna(_descricao_sugestao) else str(_descricao_sugestao)
+            _quantidade_sugestao = _linha_sugestao.get("Quantidade")
+            _quantidade_sugestao = None if pd.isna(_quantidade_sugestao) else int(_quantidade_sugestao)
             _sugestoes_sgo.append({
                 "lote": _linha_sugestao.get("Lote"),
                 "grupo": _grupo_sugestao,
                 "descricao": _descricao_sugestao,
-                "quantidade": _linha_sugestao.get("Quantidade"),
+                "quantidade": _quantidade_sugestao,
                 "marca": extrair_marca_da_descricao(_grupo_sugestao, _descricao_sugestao, _marcas_map_sugestoes),
             })
 
