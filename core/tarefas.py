@@ -16,6 +16,15 @@ Toda vez que uma tarefa entra em "Em Execução" o app marca o horário de
 início (`iniciado_em`); quando ela é concluída, grava quanto tempo levou
 num histórico (`historico_producao_tempo`), associado ao par Grupo+Marca —
 é a base da previsão de tempo de produção do Dashboard Processamento.
+
+Toda tarefa exige uma Quantidade Prevista (peças) já na criação. Ao
+concluir, pede a Quantidade Real (quanto foi executado de verdade) — os
+dois números ficam salvos lado a lado pra comparar previsto x realizado.
+Tarefas de Processamento podem nascer de um lote pendente do relatório do
+SGO (sugestão pré-preenchida com Grupo/Descrição/Quantidade do lote,
+rastreada por `lote_sgo` pra não sugerir duas vezes o mesmo lote). Cards
+concluídos há mais de 1 dia somem da visualização em cards (não são
+apagados do banco, só saem do quadro — "arquivamento" automático).
 """
 import pandas as pd
 import psycopg2.extras
@@ -55,6 +64,10 @@ SQL_ALTERACOES = [
     "ALTER TABLE tarefas_app ADD COLUMN IF NOT EXISTS marca TEXT",
     "ALTER TABLE tarefas_app ADD COLUMN IF NOT EXISTS iniciado_em TIMESTAMP",
     "ALTER TABLE tarefas_app ADD COLUMN IF NOT EXISTS tipo TEXT",
+    "ALTER TABLE tarefas_app ADD COLUMN IF NOT EXISTS quantidade_prevista INTEGER",
+    "ALTER TABLE tarefas_app ADD COLUMN IF NOT EXISTS quantidade_real INTEGER",
+    "ALTER TABLE tarefas_app ADD COLUMN IF NOT EXISTS concluido_em TIMESTAMP",
+    "ALTER TABLE tarefas_app ADD COLUMN IF NOT EXISTS lote_sgo TEXT",
 ]
 
 SQL_CRIAR_HISTORICO = """
@@ -85,6 +98,10 @@ def _garantir_tabela(cur):
 
 
 def carregar_tarefas(setor=None):
+    """Carrega as tarefas do setor (ou todas, se `setor` for None).
+    Concluídas há mais de 1 dia são "arquivadas": ficam no banco (histórico
+    de tempo/quantidade continua valendo), mas somem daqui pra não lotar o
+    quadro pra sempre."""
     conn = obter_conexao_bd()
     if conn is None:
         return None
@@ -92,16 +109,19 @@ def carregar_tarefas(setor=None):
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             _garantir_tabela(cur)
             conn.commit()
+            filtro_arquivamento = (
+                "(status <> 'Concluída' OR concluido_em IS NULL OR concluido_em >= now() - interval '1 day')"
+            )
             if setor:
                 cur.execute(
-                    "SELECT * FROM tarefas_app WHERE setor = %s ORDER BY "
+                    f"SELECT * FROM tarefas_app WHERE setor = %s AND {filtro_arquivamento} ORDER BY "
                     "CASE status WHEN 'Em Execução' THEN 0 WHEN 'A Fazer' THEN 1 ELSE 2 END, "
                     "atualizado_em DESC",
                     (setor,),
                 )
             else:
                 cur.execute(
-                    "SELECT * FROM tarefas_app ORDER BY "
+                    f"SELECT * FROM tarefas_app WHERE {filtro_arquivamento} ORDER BY "
                     "CASE status WHEN 'Em Execução' THEN 0 WHEN 'A Fazer' THEN 1 ELSE 2 END, "
                     "atualizado_em DESC"
                 )
@@ -118,16 +138,21 @@ def carregar_tarefas(setor=None):
         return None
 
 
-def criar_tarefa(titulo, descricao, setor, responsavel, criado_por, status=None, grupo=None, marca=None, tipo=None):
+def criar_tarefa(titulo, descricao, setor, responsavel, criado_por, status=None, grupo=None, marca=None, tipo=None, quantidade_prevista=None, lote_sgo=None):
     """Cria uma tarefa nova. Se `status` não for informado, usa 'Em Execução'
     quando já vem com responsável (estilo Monday: atribuir = já começou) ou
     'A Fazer' quando não vem. Se já nasce 'Em Execução', já marca o início
     (iniciado_em) — importante pra previsão de tempo funcionar mesmo em
-    tarefas criadas direto na coluna 'Em Execução'."""
+    tarefas criadas direto na coluna 'Em Execução'.
+
+    `quantidade_prevista` é exigido pela UI (não pelo banco, pra não quebrar
+    linhas antigas) — todo formulário de criação, manual ou vindo de
+    sugestão do SGO, obriga esse número antes de deixar criar."""
     status_final = status or ("Em Execução" if responsavel else "A Fazer")
     grupo = grupo or None
     marca = marca or None
     tipo = tipo or None
+    lote_sgo = lote_sgo or None
     conn = obter_conexao_bd()
     if conn is None:
         return False
@@ -136,15 +161,15 @@ def criar_tarefa(titulo, descricao, setor, responsavel, criado_por, status=None,
             _garantir_tabela(cur)
             if status_final == "Em Execução":
                 cur.execute(
-                    "INSERT INTO tarefas_app (titulo, descricao, setor, responsavel, criado_por, status, grupo, marca, tipo, iniciado_em) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())",
-                    (titulo, descricao, setor, responsavel, criado_por, status_final, grupo, marca, tipo),
+                    "INSERT INTO tarefas_app (titulo, descricao, setor, responsavel, criado_por, status, grupo, marca, tipo, quantidade_prevista, lote_sgo, iniciado_em) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())",
+                    (titulo, descricao, setor, responsavel, criado_por, status_final, grupo, marca, tipo, quantidade_prevista, lote_sgo),
                 )
             else:
                 cur.execute(
-                    "INSERT INTO tarefas_app (titulo, descricao, setor, responsavel, criado_por, status, grupo, marca, tipo) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                    (titulo, descricao, setor, responsavel, criado_por, status_final, grupo, marca, tipo),
+                    "INSERT INTO tarefas_app (titulo, descricao, setor, responsavel, criado_por, status, grupo, marca, tipo, quantidade_prevista, lote_sgo) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (titulo, descricao, setor, responsavel, criado_por, status_final, grupo, marca, tipo, quantidade_prevista, lote_sgo),
                 )
         conn.commit()
         conn.close()
@@ -161,7 +186,8 @@ def criar_tarefa(titulo, descricao, setor, responsavel, criado_por, status=None,
 
 def atualizar_tarefa(tarefa_id, **campos):
     """Atualiza qualquer combinação de titulo/descricao/status/responsavel/
-    grupo/marca. `responsavel=""` grava NULL (limpa o responsável).
+    grupo/marca/tipo/quantidade_prevista/quantidade_real/concluido_em/
+    lote_sgo. `responsavel=""` grava NULL (limpa o responsável).
 
     Dois campos especiais, não gravados diretamente:
     - iniciar=True: marca iniciado_em = now() (só se ainda não tinha um
@@ -169,14 +195,21 @@ def atualizar_tarefa(tarefa_id, **campos):
       rodando).
     - concluir=True: fecha o ciclo — grava no histórico de tempo de
       produção quantos minutos essa tarefa levou (agora - iniciado_em),
-      usando o Grupo/Marca que a tarefa tem no banco. Só grava histórico
-      se a tarefa tinha iniciado_em E Grupo E Marca preenchidos; senão só
-      limpa o iniciado_em silenciosamente (tarefa sem esses dados não
-      entra na previsão, mas não trava a conclusão)."""
+      usando o Grupo/Marca que a tarefa tem no banco, marca concluido_em
+      = now() (usado pro arquivamento automático 1 dia depois) e limpa
+      iniciado_em. Só grava histórico de TEMPO se a tarefa tinha
+      iniciado_em E Grupo E Marca preenchidos; senão só limpa o
+      iniciado_em silenciosamente (tarefa sem esses dados não entra na
+      previsão de tempo, mas não trava a conclusão). Passe também
+      quantidade_real=N junto quando concluir=True, pra registrar quanto
+      foi executado de verdade."""
     iniciar = bool(campos.pop("iniciar", False))
     concluir = bool(campos.pop("concluir", False))
 
-    campos_validos = {"titulo", "descricao", "status", "responsavel", "grupo", "marca", "tipo"}
+    campos_validos = {
+        "titulo", "descricao", "status", "responsavel", "grupo", "marca", "tipo",
+        "quantidade_prevista", "quantidade_real", "concluido_em", "lote_sgo",
+    }
     campos = {k: v for k, v in campos.items() if k in campos_validos}
     if "responsavel" in campos and campos["responsavel"] == "":
         campos["responsavel"] = None
@@ -188,6 +221,7 @@ def atualizar_tarefa(tarefa_id, **campos):
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             _garantir_tabela(cur)
 
+            extra_set_sql = []
             if concluir:
                 cur.execute(
                     "SELECT grupo, marca, iniciado_em FROM tarefas_app WHERE id = %s",
@@ -201,11 +235,13 @@ def atualizar_tarefa(tarefa_id, **campos):
                         (atual["grupo"], atual["marca"], atual["iniciado_em"]),
                     )
                 campos["iniciado_em"] = None
+                extra_set_sql.append("concluido_em = now()")
 
             set_partes = [f"{col} = %s" for col in campos]
             valores = list(campos.values())
             if iniciar:
                 set_partes.append("iniciado_em = COALESCE(iniciado_em, now())")
+            set_partes.extend(extra_set_sql)
             if set_partes:
                 set_partes.append("atualizado_em = now()")
                 valores.append(tarefa_id)
@@ -312,12 +348,16 @@ def _aplicar_edicoes_tabela(df, estado, setor, criado_por, status_fixo_para_nova
         titulo = (nova.get("titulo") or "").strip()
         if not titulo:
             continue
+        quantidade_prevista = nova.get("quantidade_prevista")
+        if not quantidade_prevista or quantidade_prevista <= 0:
+            st.error(f"Tarefa '{titulo}' não foi criada: Quantidade Prevista é obrigatória.")
+            continue
         responsavel = nova.get("responsavel") or None
         descricao = (nova.get("descricao") or "").strip()
         grupo = (nova.get("grupo") or "").strip() or None
         marca = (nova.get("marca") or "").strip() or None
         status_nova = status_fixo_para_novas or nova.get("status")
-        if criar_tarefa(titulo, descricao, setor, responsavel, criado_por, status=status_nova, grupo=grupo, marca=marca):
+        if criar_tarefa(titulo, descricao, setor, responsavel, criado_por, status=status_nova, grupo=grupo, marca=marca, quantidade_prevista=int(quantidade_prevista)):
             houve_mudanca = True
         else:
             st.error(f"Não foi possível criar a tarefa. `{st.session_state.get('ultimo_erro_bd')}`")
@@ -340,11 +380,13 @@ def _df_de_tarefas(tarefas):
             "status": t["status"],
             "grupo": t.get("grupo") or "",
             "marca": t.get("marca") or "",
+            "quantidade_prevista": t.get("quantidade_prevista"),
+            "quantidade_real": t.get("quantidade_real"),
             "atualizado": t["atualizado_em"].strftime("%d/%m %H:%M") if t["atualizado_em"] else "",
         }
         for t in tarefas
     ]
-    return pd.DataFrame(linhas, columns=["id", "titulo", "descricao", "responsavel", "status", "grupo", "marca", "atualizado"])
+    return pd.DataFrame(linhas, columns=["id", "titulo", "descricao", "responsavel", "status", "grupo", "marca", "quantidade_prevista", "quantidade_real", "atualizado"])
 
 
 def renderizar_quadro_tarefas(setor, usuarios_disponiveis=None, mostrar_titulo=True):
@@ -371,7 +413,7 @@ def renderizar_quadro_tarefas(setor, usuarios_disponiveis=None, mostrar_titulo=T
         hide_index=True,
         num_rows="dynamic",
         use_container_width=True,
-        column_order=["titulo", "descricao", "responsavel", "status", "atualizado"],
+        column_order=["titulo", "descricao", "responsavel", "status", "quantidade_prevista", "quantidade_real", "atualizado"],
         column_config={
             "id": None,
             "titulo": st.column_config.TextColumn("Tarefa", required=True, width="medium"),
@@ -380,6 +422,8 @@ def renderizar_quadro_tarefas(setor, usuarios_disponiveis=None, mostrar_titulo=T
             "status": st.column_config.SelectboxColumn("Status", options=STATUS_TAREFA, width="small"),
             "grupo": st.column_config.TextColumn("Grupo", width="small"),
             "marca": st.column_config.TextColumn("Marca", width="small"),
+            "quantidade_prevista": st.column_config.NumberColumn("Qtd Prevista", required=True, min_value=1, step=1, width="small"),
+            "quantidade_real": st.column_config.NumberColumn("Qtd Real", min_value=0, step=1, width="small", help="Preencher ao concluir"),
             "atualizado": st.column_config.TextColumn("Atualizado em", disabled=True, width="small"),
         },
     )
@@ -389,7 +433,7 @@ def renderizar_quadro_tarefas(setor, usuarios_disponiveis=None, mostrar_titulo=T
         st.rerun()
 
 
-def renderizar_paineis_tarefas(setor, usuarios_disponiveis=None, tipos_disponiveis=None):
+def renderizar_paineis_tarefas(setor, usuarios_disponiveis=None, tipos_disponiveis=None, sugestoes_sgo=None):
     """Três quadros separados (A Fazer / Em Execução / Concluída), em
     formato de cards (estilo Monday) — cada tarefa é um cartão com badge
     colorido de Tipo, e os controles (Responsável, mover, excluir) agem na
@@ -398,8 +442,15 @@ def renderizar_paineis_tarefas(setor, usuarios_disponiveis=None, tipos_disponive
 
     Tarefas de produção podem levar Tipo (Triagem/Etiquetagem/Cadastro por
     padrão) e Grupo + Marca — usados pela previsão de tempo do Dashboard
-    Processamento assim que a tarefa é concluída.
-    """
+    Processamento assim que a tarefa é concluída. Toda tarefa exige uma
+    Quantidade Prevista já na criação; ao mover pra Concluída, pede a
+    Quantidade Real antes de confirmar. Cards concluídos somem do quadro
+    depois de 1 dia (carregar_tarefas já filtra isso).
+
+    `sugestoes_sgo`, se passado, é uma lista de dicts {lote, grupo,
+    descricao, quantidade, marca} — lotes do relatório do SGO já na fase
+    Processamento que ainda não viraram tarefa (dedup por lote_sgo). Cada
+    um vira um botão de criação rápida, pré-preenchido."""
     tarefas = carregar_tarefas(setor)
     if tarefas is None:
         st.warning(f"⚠️ Não foi possível carregar as tarefas. Detalhe: `{st.session_state.get('ultimo_erro_bd')}`")
@@ -409,13 +460,48 @@ def renderizar_paineis_tarefas(setor, usuarios_disponiveis=None, tipos_disponive
     tipos_disponiveis = tipos_disponiveis or TIPOS_TAREFA_PADRAO
     opcoes_responsavel = [SEM_RESPONSAVEL] + usuarios_disponiveis
 
-    with st.expander("➕ Nova tarefa"):
+    if sugestoes_sgo:
+        lotes_ja_importados = {t.get("lote_sgo") for t in tarefas if t.get("lote_sgo")}
+        pendentes = [s for s in sugestoes_sgo if s.get("lote") not in lotes_ja_importados]
+        if pendentes:
+            with st.expander(f"📥 Sugestões do SGO — Processamento ({len(pendentes)} pendente(s))", expanded=False):
+                st.caption("Lotes do relatório do SGO já na fase Processamento. Escolha o Tipo e confirme a Quantidade Prevista (vem preenchida com a quantidade do lote) pra criar a tarefa.")
+                for s in pendentes:
+                    lote, grupo, descricao, quantidade, marca = s.get("lote"), s.get("grupo"), s.get("descricao"), s.get("quantidade"), s.get("marca")
+                    with st.container(border=True):
+                        st.markdown(f"**{descricao or grupo}**")
+                        st.caption(f"Lote {lote} · Grupo: {grupo or '—'} · Marca: {marca or 'não reconhecida'}")
+                        col_tipo, col_qtd, col_btn = st.columns([2, 1, 1])
+                        with col_tipo:
+                            tipo_sugestao = st.selectbox("Tipo", tipos_disponiveis, key=f"sugestao_tipo_{setor}_{lote}", label_visibility="collapsed")
+                        with col_qtd:
+                            qtd_sugestao = st.number_input(
+                                "Quantidade Prevista", min_value=1, step=1,
+                                value=int(quantidade) if quantidade else 1,
+                                key=f"sugestao_qtd_{setor}_{lote}", label_visibility="collapsed",
+                            )
+                        with col_btn:
+                            if st.button("➕ Criar", key=f"sugestao_criar_{setor}_{lote}", use_container_width=True):
+                                ok = criar_tarefa(
+                                    descricao or grupo or f"Lote {lote}", "", setor, None,
+                                    st.session_state.get("usuario_atual"), tipo=tipo_sugestao,
+                                    grupo=grupo, marca=marca, quantidade_prevista=int(qtd_sugestao),
+                                    lote_sgo=lote,
+                                )
+                                if ok:
+                                    st.success("Tarefa criada a partir do SGO.")
+                                    st.rerun()
+                                else:
+                                    st.error(f"Não foi possível criar. `{st.session_state.get('ultimo_erro_bd')}`")
+
+    with st.expander("➕ Nova tarefa manual"):
         with st.form(key=f"form_nova_tarefa_paineis_{setor}", clear_on_submit=True):
             col_a, col_b = st.columns(2)
             with col_a:
                 titulo_novo = st.text_input("Título")
                 tipo_novo = st.selectbox("Tipo", tipos_disponiveis, key=f"tipo_novo_{setor}")
                 responsavel_novo = st.selectbox("Responsável (opcional)", opcoes_responsavel, key=f"resp_novo_paineis_{setor}")
+                quantidade_prevista_nova = st.number_input("Quantidade Prevista (obrigatório)", min_value=1, step=1, value=1)
             with col_b:
                 descricao_nova = st.text_area("Descrição (opcional)", height=68)
                 grupo_novo = st.text_input("Grupo (opcional)", help="Usado na previsão de tempo")
@@ -430,6 +516,7 @@ def renderizar_paineis_tarefas(setor, usuarios_disponiveis=None, tipos_disponive
                         titulo_novo.strip(), descricao_nova.strip(), setor, resp,
                         st.session_state.get("usuario_atual"), tipo=tipo_novo,
                         grupo=grupo_novo.strip() or None, marca=marca_novo.strip() or None,
+                        quantidade_prevista=int(quantidade_prevista_nova),
                     )
                     if ok:
                         st.success("Tarefa criada.")
@@ -444,6 +531,8 @@ def renderizar_paineis_tarefas(setor, usuarios_disponiveis=None, tipos_disponive
         tarefas_da_coluna = [t for t in tarefas if t["status"] == status]
         with colunas_status[idx_status]:
             st.markdown(f"<h4 style='color: #ffcc00;'>{emojis[status]} {status} ({len(tarefas_da_coluna)})</h4>", unsafe_allow_html=True)
+            if status == "Concluída":
+                st.caption("Some daqui 1 dia depois de concluída (fica no histórico).")
             if not tarefas_da_coluna:
                 st.caption("—")
             for t in tarefas_da_coluna:
@@ -454,7 +543,11 @@ def _renderizar_card_tarefa(t, status, setor, opcoes_responsavel):
     """Um cartão de tarefa dentro de renderizar_paineis_tarefas. Cada
     widget age na hora (compara valor novo x valor salvo e já grava),
     sem depender de st.data_editor — é o mesmo mecanismo simples e
-    confiável do quadro de tarefas original."""
+    confiável do quadro de tarefas original.
+
+    Mover pra "Concluída" é em duas etapas: escolher o alvo já revela um
+    campo de Quantidade Real, e só grava quando confirmar — não dá pra
+    concluir sem informar quanto foi executado de verdade."""
     tid = t["id"]
     tipo_atual = t.get("tipo")
     cor_tipo = CORES_TIPO_TAREFA.get(tipo_atual, "#555b6e")
@@ -471,6 +564,13 @@ def _renderizar_card_tarefa(t, status, setor, opcoes_responsavel):
             st.caption(t["descricao"])
         if t.get("grupo") or t.get("marca"):
             st.caption(f"🏷️ {t.get('grupo') or '—'} / {t.get('marca') or '—'}")
+
+        qtd_prevista = t.get("quantidade_prevista")
+        qtd_real = t.get("quantidade_real")
+        if qtd_real is not None:
+            st.caption(f"🎯 Previsto: {qtd_prevista} · ✅ Real: {qtd_real}")
+        elif qtd_prevista is not None:
+            st.caption(f"🎯 Previsto: {qtd_prevista} pçs")
 
         resp_atual = t["responsavel"] or SEM_RESPONSAVEL
         idx_resp = opcoes_responsavel.index(resp_atual) if resp_atual in opcoes_responsavel else 0
@@ -492,25 +592,38 @@ def _renderizar_card_tarefa(t, status, setor, opcoes_responsavel):
                 st.error(f"Não foi possível salvar. `{st.session_state.get('ultimo_erro_bd')}`")
 
         outros_status = [s for s in STATUS_TAREFA if s != status]
-        col_mover, col_ir, col_del = st.columns([3, 1, 1])
-        with col_mover:
-            alvo = st.selectbox(
-                "Mover para", outros_status, key=f"mover_{setor}_{tid}", label_visibility="collapsed",
+        alvo = st.selectbox(
+            "Mover para", outros_status, key=f"mover_{setor}_{tid}", label_visibility="collapsed",
+        )
+
+        if alvo == "Concluída":
+            qtd_real_input = st.number_input(
+                "Quantidade Real (obrigatório pra concluir)", min_value=0, step=1,
+                value=int(qtd_prevista) if qtd_prevista else 0,
+                key=f"qtdreal_{setor}_{tid}",
             )
-        with col_ir:
-            if st.button("➡️", key=f"btn_mover_{setor}_{tid}", use_container_width=True):
-                campos = {"status": alvo}
-                if alvo == "Em Execução":
-                    campos["iniciar"] = True
-                elif alvo == "Concluída":
-                    campos["concluir"] = True
-                elif status == "Em Execução" and alvo == "A Fazer":
-                    campos["iniciado_em"] = None
+            if st.button("✅ Confirmar conclusão", key=f"btn_concluir_{setor}_{tid}", use_container_width=True):
+                campos = {"status": "Concluída", "concluir": True, "quantidade_real": int(qtd_real_input)}
                 if atualizar_tarefa(tid, **campos):
                     st.rerun()
                 else:
-                    st.error(f"Não foi possível mover a tarefa. `{st.session_state.get('ultimo_erro_bd')}`")
-        with col_del:
-            if st.button("🗑️", key=f"del_{setor}_{tid}", use_container_width=True):
-                if remover_tarefa(tid):
-                    st.rerun()
+                    st.error(f"Não foi possível concluir. `{st.session_state.get('ultimo_erro_bd')}`")
+        else:
+            col_ir, col_del = st.columns([3, 1])
+            with col_ir:
+                if st.button("➡️ Mover", key=f"btn_mover_{setor}_{tid}", use_container_width=True):
+                    campos = {"status": alvo}
+                    if alvo == "Em Execução":
+                        campos["iniciar"] = True
+                    if status == "Em Execução" and alvo == "A Fazer":
+                        campos["iniciado_em"] = None
+                    if status == "Concluída" and alvo != "Concluída":
+                        campos["concluido_em"] = None
+                    if atualizar_tarefa(tid, **campos):
+                        st.rerun()
+                    else:
+                        st.error(f"Não foi possível mover a tarefa. `{st.session_state.get('ultimo_erro_bd')}`")
+            with col_del:
+                if st.button("🗑️", key=f"del_{setor}_{tid}", use_container_width=True):
+                    if remover_tarefa(tid):
+                        st.rerun()
