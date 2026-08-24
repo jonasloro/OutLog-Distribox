@@ -26,6 +26,13 @@ from core.database import obter_conexao_bd
 STATUS_TAREFA = ["A Fazer", "Em Execução", "Concluída"]
 SEM_RESPONSAVEL = ""
 
+TIPOS_TAREFA_PADRAO = ["Triagem", "Etiquetagem", "Cadastro"]
+CORES_TIPO_TAREFA = {
+    "Triagem": "#4a90d9",
+    "Etiquetagem": "#e0a030",
+    "Cadastro": "#7cb342",
+}
+
 SQL_CRIAR_TABELA = """
 CREATE TABLE IF NOT EXISTS tarefas_app (
     id SERIAL PRIMARY KEY,
@@ -47,6 +54,7 @@ SQL_ALTERACOES = [
     "ALTER TABLE tarefas_app ADD COLUMN IF NOT EXISTS grupo TEXT",
     "ALTER TABLE tarefas_app ADD COLUMN IF NOT EXISTS marca TEXT",
     "ALTER TABLE tarefas_app ADD COLUMN IF NOT EXISTS iniciado_em TIMESTAMP",
+    "ALTER TABLE tarefas_app ADD COLUMN IF NOT EXISTS tipo TEXT",
 ]
 
 SQL_CRIAR_HISTORICO = """
@@ -110,7 +118,7 @@ def carregar_tarefas(setor=None):
         return None
 
 
-def criar_tarefa(titulo, descricao, setor, responsavel, criado_por, status=None, grupo=None, marca=None):
+def criar_tarefa(titulo, descricao, setor, responsavel, criado_por, status=None, grupo=None, marca=None, tipo=None):
     """Cria uma tarefa nova. Se `status` não for informado, usa 'Em Execução'
     quando já vem com responsável (estilo Monday: atribuir = já começou) ou
     'A Fazer' quando não vem. Se já nasce 'Em Execução', já marca o início
@@ -119,6 +127,7 @@ def criar_tarefa(titulo, descricao, setor, responsavel, criado_por, status=None,
     status_final = status or ("Em Execução" if responsavel else "A Fazer")
     grupo = grupo or None
     marca = marca or None
+    tipo = tipo or None
     conn = obter_conexao_bd()
     if conn is None:
         return False
@@ -127,15 +136,15 @@ def criar_tarefa(titulo, descricao, setor, responsavel, criado_por, status=None,
             _garantir_tabela(cur)
             if status_final == "Em Execução":
                 cur.execute(
-                    "INSERT INTO tarefas_app (titulo, descricao, setor, responsavel, criado_por, status, grupo, marca, iniciado_em) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())",
-                    (titulo, descricao, setor, responsavel, criado_por, status_final, grupo, marca),
+                    "INSERT INTO tarefas_app (titulo, descricao, setor, responsavel, criado_por, status, grupo, marca, tipo, iniciado_em) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())",
+                    (titulo, descricao, setor, responsavel, criado_por, status_final, grupo, marca, tipo),
                 )
             else:
                 cur.execute(
-                    "INSERT INTO tarefas_app (titulo, descricao, setor, responsavel, criado_por, status, grupo, marca) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-                    (titulo, descricao, setor, responsavel, criado_por, status_final, grupo, marca),
+                    "INSERT INTO tarefas_app (titulo, descricao, setor, responsavel, criado_por, status, grupo, marca, tipo) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (titulo, descricao, setor, responsavel, criado_por, status_final, grupo, marca, tipo),
                 )
         conn.commit()
         conn.close()
@@ -167,7 +176,7 @@ def atualizar_tarefa(tarefa_id, **campos):
     iniciar = bool(campos.pop("iniciar", False))
     concluir = bool(campos.pop("concluir", False))
 
-    campos_validos = {"titulo", "descricao", "status", "responsavel", "grupo", "marca"}
+    campos_validos = {"titulo", "descricao", "status", "responsavel", "grupo", "marca", "tipo"}
     campos = {k: v for k, v in campos.items() if k in campos_validos}
     if "responsavel" in campos and campos["responsavel"] == "":
         campos["responsavel"] = None
@@ -380,14 +389,16 @@ def renderizar_quadro_tarefas(setor, usuarios_disponiveis=None, mostrar_titulo=T
         st.rerun()
 
 
-def renderizar_paineis_tarefas(setor, usuarios_disponiveis=None):
-    """Três quadros separados (A Fazer / Em Execução / Concluída), cada um
-    sua própria tabela editável — pensado pra tela dedicada "Quadro de
-    Tarefas" do setor Processamento, onde faz sentido ver cada fase em
-    bloco próprio em vez de uma tabela só misturada.
+def renderizar_paineis_tarefas(setor, usuarios_disponiveis=None, tipos_disponiveis=None):
+    """Três quadros separados (A Fazer / Em Execução / Concluída), em
+    formato de cards (estilo Monday) — cada tarefa é um cartão com badge
+    colorido de Tipo, e os controles (Responsável, mover, excluir) agem na
+    hora, sem precisar de tabela editável. Pensado pra tela dedicada
+    "Quadro de Tarefas" do setor Processamento.
 
-    Tarefas de produção podem levar Grupo + Marca — usados pela previsão
-    de tempo do Dashboard Processamento assim que a tarefa é concluída.
+    Tarefas de produção podem levar Tipo (Triagem/Etiquetagem/Cadastro por
+    padrão) e Grupo + Marca — usados pela previsão de tempo do Dashboard
+    Processamento assim que a tarefa é concluída.
     """
     tarefas = carregar_tarefas(setor)
     if tarefas is None:
@@ -395,39 +406,111 @@ def renderizar_paineis_tarefas(setor, usuarios_disponiveis=None):
         return
 
     usuarios_disponiveis = usuarios_disponiveis or []
+    tipos_disponiveis = tipos_disponiveis or TIPOS_TAREFA_PADRAO
     opcoes_responsavel = [SEM_RESPONSAVEL] + usuarios_disponiveis
-    df_completo = _df_de_tarefas(tarefas)
 
-    houve_mudanca = False
+    with st.expander("➕ Nova tarefa"):
+        with st.form(key=f"form_nova_tarefa_paineis_{setor}", clear_on_submit=True):
+            col_a, col_b = st.columns(2)
+            with col_a:
+                titulo_novo = st.text_input("Título")
+                tipo_novo = st.selectbox("Tipo", tipos_disponiveis, key=f"tipo_novo_{setor}")
+                responsavel_novo = st.selectbox("Responsável (opcional)", opcoes_responsavel, key=f"resp_novo_paineis_{setor}")
+            with col_b:
+                descricao_nova = st.text_area("Descrição (opcional)", height=68)
+                grupo_novo = st.text_input("Grupo (opcional)", help="Usado na previsão de tempo")
+                marca_novo = st.text_input("Marca (opcional)", help="Usado na previsão de tempo")
+            enviar = st.form_submit_button("Criar tarefa", type="primary")
+            if enviar:
+                if not titulo_novo.strip():
+                    st.error("Dê um título pra tarefa.")
+                else:
+                    resp = None if responsavel_novo == SEM_RESPONSAVEL else responsavel_novo
+                    ok = criar_tarefa(
+                        titulo_novo.strip(), descricao_nova.strip(), setor, resp,
+                        st.session_state.get("usuario_atual"), tipo=tipo_novo,
+                        grupo=grupo_novo.strip() or None, marca=marca_novo.strip() or None,
+                    )
+                    if ok:
+                        st.success("Tarefa criada.")
+                        st.rerun()
+                    else:
+                        st.error(f"Não foi possível criar a tarefa. `{st.session_state.get('ultimo_erro_bd')}`")
+
     emojis = {"A Fazer": "⬜", "Em Execução": "🟡", "Concluída": "✅"}
+    colunas_status = st.columns(len(STATUS_TAREFA))
 
-    for status in STATUS_TAREFA:
-        st.markdown(f"<h4 style='color: #ffcc00;'>{emojis[status]} {status}</h4>", unsafe_allow_html=True)
-        df_status = df_completo[df_completo["status"] == status].reset_index(drop=True)
+    for idx_status, status in enumerate(STATUS_TAREFA):
+        tarefas_da_coluna = [t for t in tarefas if t["status"] == status]
+        with colunas_status[idx_status]:
+            st.markdown(f"<h4 style='color: #ffcc00;'>{emojis[status]} {status} ({len(tarefas_da_coluna)})</h4>", unsafe_allow_html=True)
+            if not tarefas_da_coluna:
+                st.caption("—")
+            for t in tarefas_da_coluna:
+                _renderizar_card_tarefa(t, status, setor, opcoes_responsavel)
 
-        editor_key = f"painel_tarefas_{setor}_{status}"
-        st.data_editor(
-            df_status,
-            key=editor_key,
-            hide_index=True,
-            num_rows="dynamic",
-            use_container_width=True,
-            column_order=["titulo", "descricao", "responsavel", "status", "grupo", "marca", "atualizado"],
-            column_config={
-                "id": None,
-                "titulo": st.column_config.TextColumn("Tarefa", required=True, width="medium"),
-                "descricao": st.column_config.TextColumn("Descrição", width="large"),
-                "responsavel": st.column_config.SelectboxColumn("Responsável", options=opcoes_responsavel, width="small"),
-                "status": st.column_config.SelectboxColumn("Status", options=STATUS_TAREFA, width="small", help="Mude aqui pra mover a tarefa pra outro quadro"),
-                "grupo": st.column_config.TextColumn("Grupo", width="small", help="Usado na previsão de tempo (opcional)"),
-                "marca": st.column_config.TextColumn("Marca", width="small", help="Usado na previsão de tempo (opcional)"),
-                "atualizado": st.column_config.TextColumn("Atualizado em", disabled=True, width="small"),
-            },
+
+def _renderizar_card_tarefa(t, status, setor, opcoes_responsavel):
+    """Um cartão de tarefa dentro de renderizar_paineis_tarefas. Cada
+    widget age na hora (compara valor novo x valor salvo e já grava),
+    sem depender de st.data_editor — é o mesmo mecanismo simples e
+    confiável do quadro de tarefas original."""
+    tid = t["id"]
+    tipo_atual = t.get("tipo")
+    cor_tipo = CORES_TIPO_TAREFA.get(tipo_atual, "#555b6e")
+
+    with st.container(border=True):
+        if tipo_atual:
+            st.markdown(
+                f"<span style='background:{cor_tipo}; color:white; padding:2px 10px; "
+                f"border-radius:10px; font-size:11px; font-weight:600;'>{tipo_atual}</span>",
+                unsafe_allow_html=True,
+            )
+        st.markdown(f"**{t['titulo']}**")
+        if t["descricao"]:
+            st.caption(t["descricao"])
+        if t.get("grupo") or t.get("marca"):
+            st.caption(f"🏷️ {t.get('grupo') or '—'} / {t.get('marca') or '—'}")
+
+        resp_atual = t["responsavel"] or SEM_RESPONSAVEL
+        idx_resp = opcoes_responsavel.index(resp_atual) if resp_atual in opcoes_responsavel else 0
+        novo_resp = st.selectbox(
+            "Responsável", opcoes_responsavel, index=idx_resp,
+            key=f"resp_{setor}_{tid}", label_visibility="collapsed",
         )
+        if novo_resp != resp_atual:
+            campos = {"responsavel": novo_resp}
+            if novo_resp and status == "A Fazer":
+                campos["status"] = "Em Execução"
+                campos["iniciar"] = True
+            elif not novo_resp and status == "Em Execução":
+                campos["status"] = "A Fazer"
+                campos["iniciado_em"] = None
+            if atualizar_tarefa(tid, **campos):
+                st.rerun()
+            else:
+                st.error(f"Não foi possível salvar. `{st.session_state.get('ultimo_erro_bd')}`")
 
-        estado = st.session_state.get(editor_key, {})
-        if _aplicar_edicoes_tabela(df_status, estado, setor, st.session_state.get("usuario_atual"), status_fixo_para_novas=status):
-            houve_mudanca = True
-
-    if houve_mudanca:
-        st.rerun()
+        outros_status = [s for s in STATUS_TAREFA if s != status]
+        col_mover, col_ir, col_del = st.columns([3, 1, 1])
+        with col_mover:
+            alvo = st.selectbox(
+                "Mover para", outros_status, key=f"mover_{setor}_{tid}", label_visibility="collapsed",
+            )
+        with col_ir:
+            if st.button("➡️", key=f"btn_mover_{setor}_{tid}", use_container_width=True):
+                campos = {"status": alvo}
+                if alvo == "Em Execução":
+                    campos["iniciar"] = True
+                elif alvo == "Concluída":
+                    campos["concluir"] = True
+                elif status == "Em Execução" and alvo == "A Fazer":
+                    campos["iniciado_em"] = None
+                if atualizar_tarefa(tid, **campos):
+                    st.rerun()
+                else:
+                    st.error(f"Não foi possível mover a tarefa. `{st.session_state.get('ultimo_erro_bd')}`")
+        with col_del:
+            if st.button("🗑️", key=f"del_{setor}_{tid}", use_container_width=True):
+                if remover_tarefa(tid):
+                    st.rerun()
