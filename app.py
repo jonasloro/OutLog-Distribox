@@ -2968,8 +2968,29 @@ elif st.session_state.aba_ativa_selecionada == "📊 Dashboard Processamento":
 
 elif st.session_state.aba_ativa_selecionada == "🗂️ Quadro de Tarefas":
     st.markdown("<h3 style='text-align: center; color: #ffcc00;'>🗂️ Quadro de Tarefas — Processamento</h3>", unsafe_allow_html=True)
-    st.caption("Preencher o Responsável já move a tarefa pra 'Em Execução'; Grupo e Marca são opcionais, mas alimentam a previsão de tempo de produção do Dashboard.")
-    renderizar_paineis_tarefas("Processamento", _usuarios_disponiveis_para_tarefas())
+    st.caption("Preencher o Responsável já move a tarefa pra 'Em Execução'; Grupo e Marca são opcionais, mas alimentam a previsão de tempo de produção do Dashboard. Quantidade Prevista é obrigatória; Quantidade Real é pedida ao concluir.")
+
+    _df_sgo_para_sugestoes = st.session_state.get("sgo_relatorio_df")
+    _sugestoes_sgo = []
+    if _df_sgo_para_sugestoes is not None and not _df_sgo_para_sugestoes.empty and "Fase" in _df_sgo_para_sugestoes.columns:
+        _marcas_map_sugestoes = st.session_state.get("marcas_por_grupo")
+        if _marcas_map_sugestoes is None:
+            _marcas_map_sugestoes = carregar_marcas_por_grupo() or {}
+            st.session_state.marcas_por_grupo = _marcas_map_sugestoes
+        _pendentes_proc = _df_sgo_para_sugestoes[_df_sgo_para_sugestoes["Fase"] == "🏭 Processamento"]
+        for _, _linha_sugestao in _pendentes_proc.iterrows():
+            _grupo_sugestao = _linha_sugestao.get("Grupo")
+            _descricao_sugestao = _linha_sugestao.get("Descrição") or ""
+            _sugestoes_sgo.append({
+                "lote": _linha_sugestao.get("Lote"),
+                "grupo": _grupo_sugestao,
+                "descricao": _descricao_sugestao,
+                "quantidade": _linha_sugestao.get("Quantidade"),
+                "marca": extrair_marca_da_descricao(_grupo_sugestao, _descricao_sugestao, _marcas_map_sugestoes),
+            })
+
+    renderizar_paineis_tarefas("Processamento", _usuarios_disponiveis_para_tarefas(), sugestoes_sgo=_sugestoes_sgo)
+
 
 elif st.session_state.aba_ativa_selecionada == "📊 Dashboard Expedição":
     st.markdown("<h3 style='text-align: center; color: #ffcc00;'>📊 Dashboard — Expedição</h3>", unsafe_allow_html=True)
