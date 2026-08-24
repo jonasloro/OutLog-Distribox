@@ -74,8 +74,13 @@ from core.usuarios import (
     criar_usuario_no_banco,
     remover_usuario_no_banco,
 )
-from core.relatorios_pdf import extrair_totais_por_grupo_pdf, extrair_baixas_romaneio_pdf
-from core.tarefas import renderizar_quadro_tarefas
+from core.relatorios_pdf import (
+    extrair_totais_por_grupo_pdf,
+    extrair_baixas_romaneio_pdf,
+    extrair_marcas_por_grupo_pdf,
+)
+from core.tarefas import renderizar_quadro_tarefas, renderizar_paineis_tarefas, calcular_previsao_tempo
+from core.marcas import salvar_marcas_por_grupo, carregar_marcas_por_grupo, extrair_marca_da_descricao
 from core.mapa_grupo_tipo import (
     TIPOS_CASULO,
     carregar_mapa_grupo_tipo,
@@ -2419,7 +2424,7 @@ SETORES = [
     ("🏠 Visão Geral", telas_visao_geral),
     ("📥 Recebimento", ["📊 Dashboard Recebimento", "🚚 SGO — Próximas Entradas"]),
     ("🔎 Qualidade", telas_qualidade),
-    ("🏭 Processamento", ["📊 Dashboard Processamento"]),
+    ("🏭 Processamento", ["📊 Dashboard Processamento", "🗂️ Quadro de Tarefas"]),
     ("📦 Estocagem", telas_estocagem),
     ("🚚 Expedição", ["📊 Dashboard Expedição", TELA_EXPEDICAO]),
     ("🛠️ Administração", telas_administracao),
@@ -2714,6 +2719,54 @@ def renderizar_servico_sgo(fase, chave_botao, titulo=None):
         st.rerun()
     st.write("---")
 
+def renderizar_previsao_processamento():
+    """Cruza os lotes pendentes do SGO na fase Processamento com o
+    histórico de tempo de produção (por Grupo+Marca, alimentado pelo
+    Quadro de Tarefas) e mostra uma previsão de quanto tempo cada um deve
+    levar. A Marca é reconhecida automaticamente dentro da Descrição do
+    SGO, usando a lista extraída do último 'Resumo de Estoque do Grupo'
+    importado. Sem histórico suficiente ainda, mostra aviso em vez de
+    número inventado."""
+    df_sgo = st.session_state.get("sgo_relatorio_df")
+    if df_sgo is None or df_sgo.empty or "Fase" not in df_sgo.columns:
+        return
+    pendente = df_sgo[df_sgo["Fase"] == "🏭 Processamento"].copy()
+    if pendente.empty:
+        return
+
+    marcas_map = st.session_state.get("marcas_por_grupo")
+    if marcas_map is None:
+        marcas_map = carregar_marcas_por_grupo() or {}
+        st.session_state.marcas_por_grupo = marcas_map
+
+    linhas_previsao = []
+    for _, linha in pendente.iterrows():
+        grupo = linha.get("Grupo")
+        descricao = linha.get("Descrição") or ""
+        marca = extrair_marca_da_descricao(grupo, descricao, marcas_map)
+        previsao = calcular_previsao_tempo(grupo, marca) if marca else None
+        if previsao:
+            texto_previsao = f"~{previsao['media_minutos']:.0f} min (média de {previsao['amostras']} produções)"
+        elif marca:
+            texto_previsao = "Sem histórico suficiente ainda"
+        else:
+            texto_previsao = "Marca não reconhecida"
+        linhas_previsao.append({
+            "Grupo": grupo,
+            "Marca": marca or "—",
+            "Peças": linha.get("Quantidade"),
+            "Previsão": texto_previsao,
+        })
+
+    if not marcas_map:
+        st.info("Nenhuma lista de Marcas por Grupo importada ainda — suba o 'Resumo de Estoque do Grupo' em Estocagem → Importar Relatório de Estoque pra habilitar a previsão.")
+
+    st.markdown("<h4 style='color: #ffcc00;'>⏱️ Previsão de Tempo de Produção</h4>", unsafe_allow_html=True)
+    st.caption("Estimativa por Grupo + Marca, com base no histórico de tarefas concluídas no Quadro de Tarefas. Só ganha precisão conforme o quadro vai sendo usado.")
+    st.dataframe(pd.DataFrame(linhas_previsao), use_container_width=True, hide_index=True)
+    st.write("---")
+
+
 def calcular_resumo_estocagem():
     """Resumo agregado de ocupação de casulos, usado tanto pelo Dashboard
     Estocagem quanto pela Visão Geral (todos os setores)."""
@@ -2908,7 +2961,15 @@ elif st.session_state.aba_ativa_selecionada == "📊 Dashboard Recebimento":
 elif st.session_state.aba_ativa_selecionada == "📊 Dashboard Processamento":
     st.markdown("<h3 style='text-align: center; color: #ffcc00;'>📊 Dashboard — Processamento</h3>", unsafe_allow_html=True)
     renderizar_servico_sgo("🏭 Processamento", "dash_proc", "Serviço a executar — lotes em processamento")
-    renderizar_quadro_tarefas("Processamento", _usuarios_disponiveis_para_tarefas())
+    renderizar_previsao_processamento()
+    if st.button("Ver Quadro de Tarefas completo →", key="dash_proc_ir_quadro"):
+        st.session_state.aba_ativa_selecionada = "🗂️ Quadro de Tarefas"
+        st.rerun()
+
+elif st.session_state.aba_ativa_selecionada == "🗂️ Quadro de Tarefas":
+    st.markdown("<h3 style='text-align: center; color: #ffcc00;'>🗂️ Quadro de Tarefas — Processamento</h3>", unsafe_allow_html=True)
+    st.caption("Preencher o Responsável já move a tarefa pra 'Em Execução'; Grupo e Marca são opcionais, mas alimentam a previsão de tempo de produção do Dashboard.")
+    renderizar_paineis_tarefas("Processamento", _usuarios_disponiveis_para_tarefas())
 
 elif st.session_state.aba_ativa_selecionada == "📊 Dashboard Expedição":
     st.markdown("<h3 style='text-align: center; color: #ffcc00;'>📊 Dashboard — Expedição</h3>", unsafe_allow_html=True)
@@ -3798,6 +3859,7 @@ elif st.session_state.aba_ativa_selecionada == "📄 Importar Relatório de Esto
             if arquivo_relatorio is not None:
                 if st.button("📥 Processar e Atualizar", type="primary"):
                     processado_com_sucesso = False
+                    marcas_reconhecidas = 0
                     try:
                         grupos_extraidos = extrair_totais_por_grupo_pdf(arquivo_relatorio)
                         if not grupos_extraidos:
@@ -3814,11 +3876,26 @@ elif st.session_state.aba_ativa_selecionada == "📄 Importar Relatório de Esto
                                     "importado_por": st.session_state.usuario_atual,
                                 }
                                 processado_com_sucesso = True
+
+                                # Reprocessa também a lista de Marcas por Grupo (usada na
+                                # previsão de tempo de produção do Dashboard Processamento) —
+                                # mesmo PDF, mesmo upload, substitui tudo do zero a cada vez.
+                                try:
+                                    arquivo_relatorio.seek(0)
+                                    marcas_extraidas = extrair_marcas_por_grupo_pdf(arquivo_relatorio)
+                                    if marcas_extraidas and salvar_marcas_por_grupo(marcas_extraidas):
+                                        st.session_state.marcas_por_grupo = marcas_extraidas
+                                        marcas_reconhecidas = sum(len(m) for m in marcas_extraidas.values())
+                                except Exception:
+                                    pass  # marca é um extra; não trava a importação principal do grupo
                     except Exception as e:
                         st.error(f"⚠️ Não consegui ler esse PDF ({e}). Confirme que é o mesmo formato do relatório 'Resumo de Estoque do Grupo'.")
 
                     if processado_com_sucesso:
-                        st.success(f"Relatório processado! {len(grupos_extraidos)} grupos reconhecidos.")
+                        msg = f"Relatório processado! {len(grupos_extraidos)} grupos reconhecidos."
+                        if marcas_reconhecidas:
+                            msg += f" {marcas_reconhecidas} combinações Grupo+Marca atualizadas (previsão de tempo de produção)."
+                        st.success(msg)
                         st.rerun()
 
     st.write("---")
