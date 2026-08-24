@@ -477,7 +477,7 @@ def renderizar_paineis_tarefas(setor, usuarios_disponiveis=None, tipos_disponive
                         with col_qtd:
                             qtd_sugestao = st.number_input(
                                 "Quantidade Prevista", min_value=1, step=1,
-                                value=int(quantidade) if quantidade else 1,
+                                value=1 if pd.isna(quantidade) else int(quantidade),
                                 key=f"sugestao_qtd_{setor}_{lote}", label_visibility="collapsed",
                             )
                         with col_btn:
