@@ -127,6 +127,9 @@ def init_db() -> None:
         conn.commit()
 
 
+OBSERVACAO_AVARIA_ANAPOLIS = "Automático — recebido via romaneio Anápolis"
+
+
 def registrar_conferencia(
     numero_documento,
     data_documento,
@@ -145,7 +148,15 @@ def registrar_conferencia(
     diferenca_total = int(total_pecas_entrada or 0) + total_anapolis - int(total_pecas_loja or 0)
     itens_distintos = len(resultado)
     tem_divergencia = any(item.get("status") != "OK" for item in resultado)
-    status = "DIVERGENTE" if tem_divergencia else "AGUARDANDO TRATAMENTO"
+    total_encontrado = int(total_pecas_entrada or 0) + total_anapolis
+    if tem_divergencia:
+        status = "DIVERGENTE"
+    elif total_anapolis > 0 and total_anapolis >= total_encontrado:
+        # Toda a devolução veio pelo romaneio de Anápolis — ou seja, é toda
+        # avaria automática (ver abaixo) e não sobra nada pra tratar manualmente.
+        status = "CONCLUÍDA"
+    else:
+        status = "AGUARDANDO TRATAMENTO"
     agora = datetime.now().astimezone()
 
     with get_connection() as conn:
@@ -227,6 +238,31 @@ def registrar_conferencia(
                         for item in resultado
                     ],
                 )
+
+                # Toda peça que chegou pelo romaneio de Anápolis já é, por
+                # definição, uma peça com avaria (Anápolis é o destino das
+                # devoluções bipadas como defeito na loja) — não faz sentido
+                # pedir pra alguém repetir isso manualmente na tratativa.
+                # Lançamos automaticamente aqui, na mesma transação em que os
+                # itens são criados, então não há risco de duplicar.
+                cur.execute(
+                    "SELECT id, quantidade_anapolis FROM devolucao_itens "
+                    "WHERE devolucao_id = %s AND quantidade_anapolis > 0",
+                    (devolucao_id,),
+                )
+                itens_anapolis = cur.fetchall()
+                if itens_anapolis:
+                    cur.executemany(
+                        """
+                        INSERT INTO devolucao_tratamentos
+                            (devolucao_id, devolucao_item_id, quantidade, destino, observacao)
+                        VALUES (%s, %s, %s, 'AVARIA', %s)
+                        """,
+                        [
+                            (devolucao_id, int(row["id"]), int(row["quantidade_anapolis"]), OBSERVACAO_AVARIA_ANAPOLIS)
+                            for row in itens_anapolis
+                        ],
+                    )
 
             itens_ok = sum(item.get("status") == "OK" for item in resultado)
             itens_faltou = sum(item.get("status") == "FALTOU" for item in resultado)
