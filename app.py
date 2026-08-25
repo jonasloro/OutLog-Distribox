@@ -4233,6 +4233,14 @@ elif st.session_state.aba_ativa_selecionada == "🚚 SGO — Próximas Entradas"
         st.info("📄 Envie o relatório do SGO para começar.\n\nSe já existir uma importação salva, o OutLog carregará automaticamente o último relatório do Supabase.")
         st.stop()
 
+    # Blindagem: se o df_sgo veio de uma sessão de navegador aberta antes de
+    # uma coluna derivada nova existir (ex.: session_state não passou pelo
+    # _enriquecer_sgo atual), reprocessa aqui. Evita KeyError sem precisar
+    # que o usuário reimporte o relatório toda vez que o código evolui.
+    if "ReprovadaAguardandoDevolucao" not in df_sgo.columns:
+        df_sgo = _enriquecer_sgo(df_sgo.copy())
+        st.session_state.sgo_relatorio_df = df_sgo
+
     # ---------- KPIs: o que está DENTRO de casa parado, não só o que vem ----------
     em_casa = df_sgo[df_sgo["EmCasaNaoEstocado"]].copy()
     pecas_em_casa = int(em_casa["Quantidade"].sum())
