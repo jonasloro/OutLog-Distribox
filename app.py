@@ -2115,6 +2115,13 @@ def _enriquecer_sgo(out):
     # disponível pra venda.
     out["EmCasaNaoEstocado"] = out["Fase"].isin(FASES_DENTRO_CD_NAO_ESTOCADO)
 
+    # Dentro da fase Qualidade tem duas situações bem diferentes: peça ainda
+    # sendo inspecionada, ou peça JÁ reprovada (retrabalho) que fica
+    # acumulando de propósito até juntar volume suficiente pra devolver ao
+    # fornecedor de uma vez. As duas contam como "em casa" do mesmo jeito,
+    # mas só a segunda é isso que os cards de "aguardando devolução" mostram.
+    out["ReprovadaAguardandoDevolucao"] = out["EmCasaNaoEstocado"] & out["StatusOriginal"].str.lower().str.contains("retrabalho", na=False)
+
     # Dias parado só faz sentido pro que está de fato em casa sem estocar —
     # é o tempo que o lote está ocupando espaço sem estar disponível.
     dias = (hoje - out["DataChegadaReal"]).dt.days
