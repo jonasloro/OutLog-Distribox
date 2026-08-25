@@ -2115,13 +2115,6 @@ def _enriquecer_sgo(out):
     # disponível pra venda.
     out["EmCasaNaoEstocado"] = out["Fase"].isin(FASES_DENTRO_CD_NAO_ESTOCADO)
 
-    # Dentro da fase Qualidade tem duas situações bem diferentes: peça ainda
-    # sendo inspecionada, ou peça JÁ reprovada (retrabalho) que fica
-    # acumulando de propósito até juntar volume suficiente pra devolver ao
-    # fornecedor de uma vez. As duas contam como "em casa" do mesmo jeito,
-    # mas só a segunda é isso que os cards de "aguardando devolução" mostram.
-    out["ReprovadaAguardandoDevolucao"] = out["EmCasaNaoEstocado"] & out["StatusOriginal"].str.lower().str.contains("retrabalho", na=False)
-
     # Dias parado só faz sentido pro que está de fato em casa sem estocar —
     # é o tempo que o lote está ocupando espaço sem estar disponível.
     dias = (hoje - out["DataChegadaReal"]).dt.days
@@ -4300,10 +4293,15 @@ elif st.session_state.aba_ativa_selecionada == "🚚 SGO — Próximas Entradas"
 
     # ---------- Ranking de envelhecimento (substitui a antiga lista de 'urgentes') ----------
     st.markdown("### ⏳ Parados há mais tempo dentro do CD")
-    if em_casa.empty:
-        st.success("✅ Nada parado: tudo que chegou já está estocado.")
+    # As reprovadas "Retrabalho" ficam paradas de propósito (acumulando pra
+    # devolução ao fornecedor — ver seção própria logo abaixo), então não
+    # entram aqui: essa lista é pra gargalo de verdade, não represamento
+    # intencional.
+    em_casa_sem_reprovadas = em_casa[~em_casa["ReprovadaAguardandoDevolucao"]]
+    if em_casa_sem_reprovadas.empty:
+        st.success("✅ Nada parado: tudo que chegou já está estocado (fora as reprovadas represadas de propósito).")
     else:
-        envelhecidos = em_casa.sort_values("DiasParado", ascending=False).head(10)
+        envelhecidos = em_casa_sem_reprovadas.sort_values("DiasParado", ascending=False).head(10)
         tabela_env = envelhecidos[["DiasParado", "Lote", "Grupo", "Fornecedor", "Quantidade", "Fase", "DataChegadaReal"]].copy()
         tabela_env["DataChegadaReal"] = tabela_env["DataChegadaReal"].dt.strftime("%d/%m/%Y")
         tabela_env["DiasParado"] = tabela_env["DiasParado"].astype(int)
@@ -4313,34 +4311,6 @@ elif st.session_state.aba_ativa_selecionada == "🚚 SGO — Próximas Entradas"
         })
         st.dataframe(tabela_env, use_container_width=True, hide_index=True, height=390)
         botao_exportar_excel(tabela_env, "sgo_parados.xlsx", key="export_sgo_parados")
-
-    # ---------- Reprovadas acumulando pra devolução ao fornecedor ----------
-    st.markdown("### 📦 Reprovadas aguardando devolução ao fornecedor")
-    st.caption("Peça reprovada na Qualidade fica represada de propósito até juntar volume suficiente pra devolver ao fornecedor de uma vez só — continua contando como ativo enquanto isso.")
-    reprovadas = df_sgo[df_sgo["ReprovadaAguardandoDevolucao"]].copy()
-    if reprovadas.empty:
-        st.info("Nenhuma peça reprovada acumulada no momento.")
-    else:
-        resumo_reprovadas = reprovadas.groupby("Fornecedor").agg(
-            Lotes=("Lote", "nunique"),
-            Peças=("Quantidade", "sum"),
-            Valor=("ValorCusto", "sum"),
-            MaisAntiga=("DiasParado", "max"),
-        ).reset_index().sort_values("Peças", ascending=False)
-        resumo_reprovadas["Valor"] = resumo_reprovadas["Valor"].round(2)
-        resumo_reprovadas["MaisAntiga"] = resumo_reprovadas["MaisAntiga"].astype(int)
-        resumo_reprovadas = resumo_reprovadas.rename(columns={
-            "Valor": "Valor custo (R$)", "MaisAntiga": "Peça mais antiga (dias)",
-        })
-        c1, c2 = st.columns([3, 2])
-        with c1:
-            st.dataframe(resumo_reprovadas, use_container_width=True, hide_index=True)
-            botao_exportar_excel(resumo_reprovadas, "sgo_reprovadas_devolucao.xlsx", key="export_sgo_reprovadas")
-        with c2:
-            st.bar_chart(resumo_reprovadas.set_index("Fornecedor")["Peças"])
-        total_pecas_reprovadas = int(reprovadas["Quantidade"].sum())
-        total_valor_reprovadas = float(reprovadas["ValorCusto"].sum())
-        st.caption(f"💰 Total represado: {total_pecas_reprovadas:,} peças · R$ {total_valor_reprovadas:,.2f} em custo parado, aguardando lote suficiente pra devolução.")
 
     # ---------- Fornecedor: volume em aberto e pontualidade ----------
     with st.expander("🏭 Por fornecedor — volume em aberto e pontualidade"):
