@@ -2090,7 +2090,7 @@ def _sgo_fase(status):
     if "conclu" in sl: return "✅ Concluído"
     return str(status or "⚪ Sem status").strip() or "⚪ Sem status"
 
-FASES_JA_ESTOCADO = ["📦 Em Estocagem", "✅ Concluído"]
+FASES_JA_ESTOCADO = ["✅ Concluído"]
 FASES_FORA_DO_FLUXO = ["✅ Concluído", "⛔ Rejeitado"]
 
 def _enriquecer_sgo(out):
