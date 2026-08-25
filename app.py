@@ -2090,7 +2090,7 @@ def _sgo_fase(status):
     if "conclu" in sl: return "✅ Concluído"
     return str(status or "⚪ Sem status").strip() or "⚪ Sem status"
 
-FASES_JA_ESTOCADO = ["✅ Concluído"]
+FASES_DENTRO_CD_NAO_ESTOCADO = ["🔎 Qualidade", "🏭 Processamento", "📦 Em Estocagem"]
 FASES_FORA_DO_FLUXO = ["✅ Concluído", "⛔ Rejeitado"]
 
 def _enriquecer_sgo(out):
@@ -2106,13 +2106,19 @@ def _enriquecer_sgo(out):
     out["DataChegadaReal"] = chegada.where(ja_chegou)
     out["DataChegadaPrevista"] = chegada.where(chegada.notna() & (chegada > hoje))
 
-    # Dias parado só faz sentido pro que já entrou fisicamente e ainda não
-    # foi estocado — é o tempo que o lote está ocupando espaço sem estar
-    # disponível.
-    ainda_nao_estocado = ~out["Fase"].isin(FASES_JA_ESTOCADO)
+    # "Em casa, não estocado" é definido pela FASE atual, não pela data de
+    # chegada: Aviamento (na costura) e Em Trânsito ficam FORA do CD mesmo
+    # que o lote já tenha uma data de chegada antiga registrada de uma
+    # passagem anterior por aqui (ex.: voltou pra Aviamento em retrabalho).
+    # Só Qualidade, Processamento e Estocagem contam como "dentro de casa,
+    # ainda sem estar guardado" — é isso que ocupa espaço sem estar
+    # disponível pra venda.
+    out["EmCasaNaoEstocado"] = out["Fase"].isin(FASES_DENTRO_CD_NAO_ESTOCADO)
+
+    # Dias parado só faz sentido pro que está de fato em casa sem estocar —
+    # é o tempo que o lote está ocupando espaço sem estar disponível.
     dias = (hoje - out["DataChegadaReal"]).dt.days
-    out["DiasParado"] = dias.where(ja_chegou & ainda_nao_estocado)
-    out["EmCasaNaoEstocado"] = ja_chegou & ainda_nao_estocado & ~out["Fase"].isin(["⛔ Rejeitado"])
+    out["DiasParado"] = dias.where(out["EmCasaNaoEstocado"])
 
     out["ValorCusto"] = out["Quantidade"] * out.get("CustoUnit", 0.0)
 
