@@ -31,6 +31,12 @@ def init_tratamento_db() -> None:
                 )
                 """
             )
+            # Só faz sentido pra tratamentos com destino AVARIA: marca quando
+            # a peça foi de fato inspecionada e encaminhada ao bazar (destino
+            # final de hoje pra avaria). NULL = ainda aguardando inspeção.
+            cur.execute(
+                "ALTER TABLE devolucao_tratamentos ADD COLUMN IF NOT EXISTS encaminhado_bazar_em TIMESTAMPTZ"
+            )
         conn.commit()
 
 
@@ -246,7 +252,7 @@ def listar_avarias(loja: str | None = None, data_inicio=None, data_fim=None):
             cur.execute(
                 f"""
                 SELECT
-                    dt.id, dt.quantidade, dt.observacao, dt.criado_em,
+                    dt.id, dt.quantidade, dt.observacao, dt.criado_em, dt.encaminhado_bazar_em,
                     d.id AS devolucao_id, d.numero_documento, d.loja, d.data_documento,
                     i.codigo_barras, i.descricao, i.grade
                 FROM devolucao_tratamentos dt
@@ -258,6 +264,37 @@ def listar_avarias(loja: str | None = None, data_inicio=None, data_fim=None):
                 params,
             )
             return cur.fetchall()
+
+
+def marcar_encaminhado_bazar(tratamento_ids: list[int]) -> None:
+    """Marca os lançamentos de AVARIA selecionados como já inspecionados e
+    encaminhados ao bazar (destino final de hoje pra peça com defeito).
+    Não reverte sozinho — se marcar errado, ver desfazer_encaminhamento_bazar."""
+    if not tratamento_ids:
+        return
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE devolucao_tratamentos SET encaminhado_bazar_em = NOW() "
+                "WHERE id = ANY(%s) AND destino = 'AVARIA'",
+                (tratamento_ids,),
+            )
+        conn.commit()
+
+
+def desfazer_encaminhamento_bazar(tratamento_ids: list[int]) -> None:
+    """Volta o(s) lançamento(s) pra 'aguardando inspeção', caso tenha marcado
+    como encaminhado ao bazar por engano."""
+    if not tratamento_ids:
+        return
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE devolucao_tratamentos SET encaminhado_bazar_em = NULL "
+                "WHERE id = ANY(%s) AND destino = 'AVARIA'",
+                (tratamento_ids,),
+            )
+        conn.commit()
 
 
 def indicadores_avarias_por_loja():
