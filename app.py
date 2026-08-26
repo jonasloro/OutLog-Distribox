@@ -95,12 +95,16 @@ from modules.devolucoes.database import listar_devolucoes
 from modules.devolucoes.tratamento import listar_avarias
 from modules.devolucoes.services import preparar_banco as preparar_banco_devolucoes
 from modules.devolucoes.tratamento import init_tratamento_db as init_tratamento_db_devolucoes
+from modules.devolucoes.pedidos_database import init_pedidos_db as init_pedidos_db_devolucoes
 from modules.devolucoes.parser import ParserRomaneio as ParserRomaneioDevolucoes
 from modules.devolucoes.pages import (
+    anapolis as pagina_devolucoes_anapolis,
     configuracoes as pagina_devolucoes_configuracoes,
     dashboard as pagina_devolucoes_dashboard,
     historico as pagina_devolucoes_historico,
     indicadores as pagina_devolucoes_indicadores,
+    pedidos as pagina_devolucoes_pedidos,
+    pendencias as pagina_devolucoes_pendencias,
     qualidade as pagina_devolucoes_qualidade,
     recebimento as pagina_devolucoes_recebimento,
 )
@@ -1817,6 +1821,7 @@ if 'devolucoes_banco_preparado' not in st.session_state:
     try:
         preparar_banco_devolucoes()
         init_tratamento_db_devolucoes()
+        init_pedidos_db_devolucoes()
         st.session_state.devolucoes_banco_preparado = True
         st.session_state.devolucoes_erro_banco = None
     except Exception as e:
@@ -2390,7 +2395,10 @@ TELA_EXPEDICAO = "🚚 Expedição (Teste)"
 # Registro → Tratamento → Histórico → Indicadores.
 telas_devolucoes = [
     "🏠 Devoluções — Dashboard",
+    "📨 Devoluções — Pedidos",
+    "⚠️ Devoluções — Pendências",
     "📥 Devoluções — Recebimento",
+    "📋 Devoluções — Anápolis",
     "🕘 Devoluções — Histórico",
     "📊 Devoluções — Indicadores",
 ]
@@ -4639,7 +4647,10 @@ elif st.session_state.aba_ativa_selecionada in telas_devolucoes:
     else:
         _pagina_devolucoes = {
             "🏠 Devoluções — Dashboard": pagina_devolucoes_dashboard,
+            "📨 Devoluções — Pedidos": pagina_devolucoes_pedidos,
+            "⚠️ Devoluções — Pendências": pagina_devolucoes_pendencias,
             "📥 Devoluções — Recebimento": pagina_devolucoes_recebimento,
+            "📋 Devoluções — Anápolis": pagina_devolucoes_anapolis,
             "🕘 Devoluções — Histórico": pagina_devolucoes_historico,
             "📊 Devoluções — Indicadores": pagina_devolucoes_indicadores,
         }[st.session_state.aba_ativa_selecionada]
@@ -4654,6 +4665,8 @@ elif st.session_state.aba_ativa_selecionada in telas_devolucoes:
 
         if _pagina_devolucoes is pagina_devolucoes_recebimento:
             _pagina_devolucoes.render(LOJAS_DEVOLUCOES, st.session_state.devolucoes_parser)
+        elif _pagina_devolucoes is pagina_devolucoes_pedidos:
+            _pagina_devolucoes.render(LOJAS_DEVOLUCOES)
         else:
             _pagina_devolucoes.render()
 
