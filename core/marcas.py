@@ -29,7 +29,11 @@ def _garantir_tabela(cur):
 
 def salvar_marcas_por_grupo(marcas_por_grupo):
     """Substitui TODO o conteúdo da tabela pelo dicionário {grupo: [marcas]}
-    recém-extraído do PDF — reprocessamento completo, não incremental."""
+    recém-extraído do PDF — reprocessamento completo, não incremental.
+
+    Grava em blocos multi-valor (não linha por linha) — com executemany()
+    o psycopg2 manda uma instrução por linha, uma de cada vez; um relatório
+    com milhares de combinações Grupo+Marca levava bem mais tempo assim."""
     conn = obter_conexao_bd()
     if conn is None:
         return False
@@ -38,11 +42,15 @@ def salvar_marcas_por_grupo(marcas_por_grupo):
             _garantir_tabela(cur)
             cur.execute("DELETE FROM marcas_por_grupo")
             linhas = [(g, m) for g, marcas in marcas_por_grupo.items() for m in marcas]
-            if linhas:
-                cur.executemany(
-                    "INSERT INTO marcas_por_grupo (grupo, marca) VALUES (%s, %s) "
+            tamanho_bloco = 500
+            for i in range(0, len(linhas), tamanho_bloco):
+                bloco = linhas[i:i + tamanho_bloco]
+                marcadores = ", ".join(["(%s, %s)"] * len(bloco))
+                valores = [v for par in bloco for v in par]
+                cur.execute(
+                    f"INSERT INTO marcas_por_grupo (grupo, marca) VALUES {marcadores} "
                     "ON CONFLICT DO NOTHING",
-                    linhas,
+                    valores,
                 )
         conn.commit()
         conn.close()
