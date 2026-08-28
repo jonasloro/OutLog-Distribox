@@ -8,18 +8,20 @@ import re
 import pypdf
 
 
-def extrair_totais_por_grupo_pdf(arquivo_pdf):
-    """
-    Lê um PDF no formato 'Resumo de Estoque do Grupo' (agrupado por GRUPO,
-    detalhado por MARCA) e retorna uma lista de (nome_grupo, quantidade) com
-    o SUBTOTAL de peças de cada grupo — ignora os valores de custo/venda e
-    o detalhe por marca, que não são necessários pro planejamento de casulos.
-    """
+def _extrair_texto_pdf(arquivo_pdf):
+    """Lê o PDF uma única vez e devolve o texto de todas as páginas já
+    concatenado — usado pelas duas funções de 'Resumo de Estoque do Grupo'
+    pra não precisar abrir/ler o PDF duas vezes (era o gargalo do Importar
+    Relatório de Estoque: cada leitura de PDF grande é cara, e o app lia o
+    mesmo arquivo duas vezes — uma pros totais, outra pras marcas)."""
     leitor = pypdf.PdfReader(arquivo_pdf)
     texto_completo = ""
     for pagina in leitor.pages:
         texto_completo += pagina.extract_text(extraction_mode="layout") + "\n"
+    return texto_completo
 
+
+def _parse_totais_por_grupo(texto_completo):
     padrao_dinheiro = re.compile(r'^\d{1,3}(\.\d{3})*,\d{2}$')
     padrao_metadado = re.compile(r'(RESUMO DE ESTOQUE|Agrupado por|Empresas:|DESCRIÇÃO|Pag\.:|Detalhado por|Emitir P\.|^\d{2}\s*-\s*CD)', re.I)
 
@@ -70,10 +72,20 @@ def extrair_totais_por_grupo_pdf(arquivo_pdf):
     return grupos
 
 
+def extrair_totais_por_grupo_pdf(arquivo_pdf):
+    """
+    Lê um PDF no formato 'Resumo de Estoque do Grupo' (agrupado por GRUPO,
+    detalhado por MARCA) e retorna uma lista de (nome_grupo, quantidade) com
+    o SUBTOTAL de peças de cada grupo — ignora os valores de custo/venda e
+    o detalhe por marca, que não são necessários pro planejamento de casulos.
+    """
+    return _parse_totais_por_grupo(_extrair_texto_pdf(arquivo_pdf))
+
+
 SUFIXOS_VARIANTE_MARCA = {"L", "N", "PROMO", "KIDS", "BLACK", "NAC", "FITNESS", "COLEÇÃO"}
 
 
-def extrair_marcas_por_grupo_pdf(arquivo_pdf):
+def _parse_marcas_por_grupo(texto_completo):
     """
     Lê o mesmo PDF 'Resumo de Estoque do Grupo' (agrupado por GRUPO,
     detalhado por MARCA) e retorna {grupo: [marcas]} — o detalhe por marca
@@ -85,11 +97,6 @@ def extrair_marcas_por_grupo_pdf(arquivo_pdf):
     pra consolidar "MAX GLAMM", "MAX GLAMM PROMO" e "MAX GLAMM FITNESS"
     numa marca só: "MAX GLAMM".
     """
-    leitor = pypdf.PdfReader(arquivo_pdf)
-    texto_completo = ""
-    for pagina in leitor.pages:
-        texto_completo += pagina.extract_text(extraction_mode="layout") + "\n"
-
     padrao_dinheiro = re.compile(r'^\d{1,3}(\.\d{3})*,\d{2}$')
     padrao_metadado = re.compile(r'(RESUMO DE ESTOQUE|Agrupado por|Empresas:|DESCRIÇÃO|Pag\.:|Detalhado por|Emitir P\.|^\d{2}\s*-\s*CD)', re.I)
     padrao_qtd = re.compile(r'^\d+(\.\d{3})*$')
@@ -134,6 +141,30 @@ def extrair_marcas_por_grupo_pdf(arquivo_pdf):
         grupo_atual = linha
 
     return {grupo: sorted(marcas) for grupo, marcas in marcas_por_grupo.items()}
+
+
+def extrair_marcas_por_grupo_pdf(arquivo_pdf):
+    """Mesma extração de marcas de antes — mantida por compatibilidade com
+    quem já chama essa função isoladamente. Pra quando for preciso os
+    totais E as marcas do mesmo PDF, usar
+    extrair_totais_e_marcas_por_grupo_pdf() em vez de chamar as duas
+    funções separadas: ela lê o PDF uma única vez."""
+    return _parse_marcas_por_grupo(_extrair_texto_pdf(arquivo_pdf))
+
+
+def extrair_totais_e_marcas_por_grupo_pdf(arquivo_pdf):
+    """Extrai totais por grupo E marcas por grupo lendo o PDF uma ÚNICA vez
+    — usada no Importar Relatório de Estoque, que precisa das duas coisas
+    do mesmo upload. Antes disso existir, o app chamava
+    extrair_totais_por_grupo_pdf() e extrair_marcas_por_grupo_pdf() em
+    sequência, cada uma abrindo e lendo o PDF do zero — pra um relatório
+    com muitas páginas, isso dobrava o tempo de processamento à toa.
+    Retorna (grupos, marcas_por_grupo) no mesmo formato das funções
+    individuais."""
+    texto_completo = _extrair_texto_pdf(arquivo_pdf)
+    grupos = _parse_totais_por_grupo(texto_completo)
+    marcas_por_grupo = _parse_marcas_por_grupo(texto_completo)
+    return grupos, marcas_por_grupo
 
 
 def extrair_baixas_romaneio_pdf(arquivo_pdf):
