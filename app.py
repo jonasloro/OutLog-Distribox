@@ -77,7 +77,7 @@ from core.usuarios import (
 from core.relatorios_pdf import (
     extrair_totais_por_grupo_pdf,
     extrair_baixas_romaneio_pdf,
-    extrair_marcas_por_grupo_pdf,
+    extrair_totais_e_marcas_por_grupo_pdf,
 )
 from core.tarefas import renderizar_quadro_tarefas, renderizar_paineis_tarefas, calcular_previsao_tempo
 from core.marcas import salvar_marcas_por_grupo, carregar_marcas_por_grupo, extrair_marca_da_descricao
@@ -3907,7 +3907,7 @@ elif st.session_state.aba_ativa_selecionada == "📄 Importar Relatório de Esto
                     processado_com_sucesso = False
                     marcas_reconhecidas = 0
                     try:
-                        grupos_extraidos = extrair_totais_por_grupo_pdf(arquivo_relatorio)
+                        grupos_extraidos, marcas_extraidas_upload = extrair_totais_e_marcas_por_grupo_pdf(arquivo_relatorio)
                         if not grupos_extraidos:
                             st.error("⚠️ Não consegui reconhecer nenhum grupo nesse PDF. Confirme que é o relatório 'Resumo de Estoque do Grupo'.")
                         else:
@@ -3925,13 +3925,12 @@ elif st.session_state.aba_ativa_selecionada == "📄 Importar Relatório de Esto
 
                                 # Reprocessa também a lista de Marcas por Grupo (usada na
                                 # previsão de tempo de produção do Dashboard Processamento) —
-                                # mesmo PDF, mesmo upload, substitui tudo do zero a cada vez.
+                                # mesmo PDF, mesma leitura (já extraída acima, não relê o
+                                # arquivo do zero), substitui tudo do zero a cada vez.
                                 try:
-                                    arquivo_relatorio.seek(0)
-                                    marcas_extraidas = extrair_marcas_por_grupo_pdf(arquivo_relatorio)
-                                    if marcas_extraidas and salvar_marcas_por_grupo(marcas_extraidas):
-                                        st.session_state.marcas_por_grupo = marcas_extraidas
-                                        marcas_reconhecidas = sum(len(m) for m in marcas_extraidas.values())
+                                    if marcas_extraidas_upload and salvar_marcas_por_grupo(marcas_extraidas_upload):
+                                        st.session_state.marcas_por_grupo = marcas_extraidas_upload
+                                        marcas_reconhecidas = sum(len(m) for m in marcas_extraidas_upload.values())
                                 except Exception:
                                     pass  # marca é um extra; não trava a importação principal do grupo
                     except Exception as e:
