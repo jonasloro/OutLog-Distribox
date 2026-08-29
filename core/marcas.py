@@ -97,11 +97,29 @@ def extrair_marca_da_descricao(grupo, descricao, marcas_por_grupo=None):
     casar por engano um nome que é prefixo de outro (ex.: 'DIMY' dentro de
     algo que na verdade é 'DIMY PROMO' já vira só 'DIMY' na lista, então
     esse caso específico não ocorre, mas a ordenação protege casos
-    parecidos com outras marcas)."""
+    parecidos com outras marcas).
+
+    O Grupo do relatório do SGO costuma ser mais genérico que o Grupo do
+    Resumo de Estoque (ex.: SGO tem só "CAMISETA", enquanto o Resumo tem
+    "CAMISETA FEMIN", "CAMISETA MC MASC", "CAMISETA ML MASC" separados).
+    Se não achar o Grupo exato, cai pra um fallback: junta as marcas de
+    TODOS os grupos do Resumo que começam com o Grupo do SGO."""
     if not grupo or not descricao:
         return None
     mapa = marcas_por_grupo if marcas_por_grupo is not None else (st.session_state.get("marcas_por_grupo") or {})
-    candidatas = mapa.get(grupo, [])
+    grupo_upper = grupo.strip().upper()
+
+    candidatas = mapa.get(grupo) or mapa.get(grupo_upper)
+    if not candidatas:
+        candidatas = []
+        vistas = set()
+        for chave, marcas in mapa.items():
+            if chave.strip().upper().startswith(grupo_upper):
+                for m in marcas:
+                    if m not in vistas:
+                        vistas.add(m)
+                        candidatas.append(m)
+
     descricao_upper = descricao.upper()
     for marca in sorted(candidatas, key=len, reverse=True):
         if marca in descricao_upper:
