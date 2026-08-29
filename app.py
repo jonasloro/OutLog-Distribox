@@ -2543,6 +2543,23 @@ if st.sidebar.button("🚪 Sair"):
     st.session_state.papel_atual = None
     st.rerun()
 
+# Carrega o relatório do SGO (Supabase) uma vez por sessão, ANTES de
+# qualquer tela renderizar — antes disso, só a tela "SGO — Próximas
+# Entradas" fazia esse carregamento, então quem abrisse direto o Dashboard
+# de qualquer setor (Recebimento/Processamento/Qualidade/Expedição) via
+# reboot/sessão nova via essas telas em branco (a "Previsão de Tempo" e o
+# "Serviço a executar" dependem de sgo_relatorio_df já estar carregado, e
+# nenhuma delas fazia esse fallback sozinha).
+if st.session_state.get("sgo_relatorio_df") is None:
+    try:
+        _df_sgo_boot, _nome_sgo_boot, _importado_em_sgo_boot = carregar_ultimo_relatorio_sgo_supabase()
+        if _df_sgo_boot is not None:
+            st.session_state.sgo_relatorio_df = _df_sgo_boot
+            st.session_state.sgo_relatorio_nome = _nome_sgo_boot
+            st.session_state.sgo_relatorio_atualizado_em = _importado_em_sgo_boot
+    except Exception:
+        pass  # sem relatório salvo ainda, ou banco indisponível — as telas que dependem disso já tratam None normalmente
+
 # PESQUISA GLOBAL
 st.sidebar.markdown("---")
 st.sidebar.markdown("<h4 style='color: #ffcc00;'>🔎 Localizador Global</h4>", unsafe_allow_html=True)
