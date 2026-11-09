@@ -7,6 +7,8 @@ própria checagem de import.
 """
 import streamlit as st
 
+from core.demo import modo_demonstracao_ativo
+
 try:
     import psycopg2
     PSYCOPG2_DISPONIVEL = True
@@ -48,6 +50,9 @@ def _obter_config_bd():
 
 
 def obter_conexao_bd():
+    if modo_demonstracao_ativo():
+        st.session_state.ultimo_erro_bd = "Supabase desativado no modo de demonstração."
+        return None
     if not PSYCOPG2_DISPONIVEL:
         st.session_state.ultimo_erro_bd = (
             "biblioteca 'psycopg2-binary' não instalada — "

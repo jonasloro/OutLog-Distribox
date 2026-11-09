@@ -67,6 +67,10 @@ except ImportError:
 # extração de dados de PDF. Mantidas com os MESMOS NOMES para não exigir
 # nenhuma outra mudança no resto deste arquivo.
 from core.database import _obter_config_bd, obter_conexao_bd, testar_conexao_bd
+from core.demo import modo_demonstracao_ativo
+
+# Ativado somente por configuração explícita no ambiente/Secrets.
+MODO_DEMONSTRACAO = modo_demonstracao_ativo()
 from core.usuarios import (
     gerar_hash_senha,
     verificar_senha,
@@ -845,6 +849,9 @@ def renderizar_cabecalho_colunas(lista_colunas):
 def _obter_config_id_brasil():
     """Retorna (base_url, usuario, senha) a partir dos Secrets do Streamlit,
     ou None se não estiver configurado/incompleto."""
+    if MODO_DEMONSTRACAO:
+        st.session_state.ultimo_erro_id_brasil = "API ID Brasil desativada no modo de demonstração."
+        return None
     try:
         if "ID_BRASIL_API_BASE_URL" in st.secrets:
             return {
@@ -1783,8 +1790,10 @@ if 'aba_ativa_selecionada' not in st.session_state:
     st.session_state.aba_ativa_selecionada = "🏠 Visão Geral — Todos os Setores"
 
 if 'usuarios_cadastrados' not in st.session_state:
-    usuarios_bd = carregar_usuarios_do_banco()
-    if usuarios_bd is not None:
+    usuarios_bd = None if MODO_DEMONSTRACAO else carregar_usuarios_do_banco()
+    if MODO_DEMONSTRACAO:
+        st.session_state.usuarios_cadastrados = {}
+    elif usuarios_bd is not None:
         if not usuarios_bd:
             # Banco de usuários vazio (primeira vez) — cria o admin padrão já com hash.
             hash_admin_padrao = gerar_hash_senha("admin123")
@@ -1804,6 +1813,17 @@ if 'usuario_atual' not in st.session_state:
 if 'papel_atual' not in st.session_state:
     st.session_state.papel_atual = None
 
+# Sessão temporária do modo demonstração; nunca reutilizá-la quando desativado.
+if MODO_DEMONSTRACAO:
+    st.session_state.autenticado = True
+    st.session_state.usuario_atual = "demo"
+    st.session_state.papel_atual = "gerente"
+    st.session_state._outlog_demo_session = True
+elif st.session_state.pop("_outlog_demo_session", False):
+    st.session_state.autenticado = False
+    st.session_state.usuario_atual = None
+    st.session_state.papel_atual = None
+
 if 'relatorio_estoque_grupos' not in st.session_state:
     grupos_bd, meta_bd = carregar_ultimo_relatorio_do_banco()
     if grupos_bd is not None:
@@ -1817,7 +1837,11 @@ if 'relatorio_estoque_grupos' not in st.session_state:
 # do Supabase do resto do app. Erros aqui (ex.: secret ainda não
 # configurado) ficam guardados em session_state em vez de derrubar o app
 # inteiro — as próprias telas de Devoluções avisam o usuário.
-if 'devolucoes_banco_preparado' not in st.session_state:
+if MODO_DEMONSTRACAO:
+    st.session_state.devolucoes_banco_preparado = False
+    st.session_state.devolucoes_erro_banco = "Banco Neon desativado no modo de demonstração."
+elif ('devolucoes_banco_preparado' not in st.session_state
+      or st.session_state.get("devolucoes_erro_banco") == "Banco Neon desativado no modo de demonstração."):
     try:
         preparar_banco_devolucoes()
         init_tratamento_db_devolucoes()
@@ -2070,6 +2094,12 @@ if not st.session_state.autenticado:
 
     st.stop()
 
+if MODO_DEMONSTRACAO:
+    st.warning(
+        "⚠️ Modo de demonstração sem login: acesso público a quem tiver o link. "
+        "Supabase, Neon e API ID Brasil estão desativados. "
+        "Alterações locais não são persistidas; desative este modo antes de usar dados reais."
+    )
 
 
 # ==========================================
@@ -2537,7 +2567,9 @@ else:
     st.sidebar.markdown("<p style='text-align:center; color:#f39c12; font-size:11px;'>🟡 Sem banco configurado — estoque só nesta sessão</p>", unsafe_allow_html=True)
     if st.session_state.ultimo_erro_bd:
         st.sidebar.markdown(f"<p style='text-align:center; color:#f39c12; font-size:10px;'>Motivo: {st.session_state.ultimo_erro_bd}</p>", unsafe_allow_html=True)
-if st.sidebar.button("🚪 Sair"):
+if MODO_DEMONSTRACAO:
+    st.sidebar.caption("🧪 Demonstração sem login — bancos externos desativados")
+elif st.sidebar.button("🚪 Sair"):
     st.session_state.autenticado = False
     st.session_state.usuario_atual = None
     st.session_state.papel_atual = None

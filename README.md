@@ -32,3 +32,32 @@ Dividir esse núcleo com segurança dá pra fazer, mas exige primeiro trocar ess
 Adicionado como novo item do setor **🚚 Expedição** na sidebar, com 8 telas (Dashboard, Recebimento, Conferência, Pendências, Aguardando decisão, Defeitos Anápolis, Histórico, Indicadores). Usa um banco **Neon PostgreSQL separado do Supabase principal** — configure o secret `DATABASE_URL` (Settings → Secrets do Streamlit) apontando para esse Neon. Sem esse secret, as telas de Devoluções mostram um aviso e não afetam o resto do app.
 
 Fluxo oficial: Romaneio da Loja + Romaneio Entrada CD + Romaneio Entrada Anápolis → Conferência → Registro → Tratamento → Histórico → Indicadores. Regra da conferência: Loja = Entrada CD + Entrada Anápolis. Mais detalhes em `modules/devolucoes/`.
+
+
+## Acesso de demonstração sem Supabase
+
+Se o projeto Supabase antigo foi apagado e você só precisa **visualizar a interface**
+do OutLog, pode habilitar **temporariamente** o modo de demonstração sem login.
+
+Em **Streamlit Community Cloud → App → Settings → Secrets**, adicione:
+
+```toml
+OUTLOG_DEMO_MODE = true
+```
+
+Reinicie o aplicativo. Ele abrirá diretamente com o perfil visual `demo`
+e permissões de gerente, sem pedir usuário/senha. **Atenção: qualquer pessoa com
+o link poderá acessar a interface enquanto esse modo estiver ativado.**
+Use apenas em um ambiente de demonstração sem dados sensíveis.
+
+Nesse modo, as conexões com **Supabase, Neon (Devoluções) e API ID Brasil**
+ficam desativadas. Páginas que dependem desses serviços podem mostrar avisos
+ou informações vazias. Alterações feitas na sessão não são persistidas em banco.
+Para voltar ao login normal, remova `OUTLOG_DEMO_MODE` (ou defina `false`) e
+reinicie o aplicativo. A ausência do Supabase, sozinha, **não** ativa o
+acesso sem senha.
+
+Se preferir manter o login sem Supabase, a versão legada ainda possui o
+usuário local de contingência `admin` / `admin123`. Essa senha está
+registrada no código antigo e **não deve ser usada em um sistema público ou
+com dados reais**.
